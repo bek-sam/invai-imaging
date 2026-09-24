@@ -1,0 +1,8 @@
+__pycache__/
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+*.png
+*.pdf
+!tests/fixtures/**

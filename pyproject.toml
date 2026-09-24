@@ -1,0 +1,27 @@
+[project]
+name = "invai-imaging"
+version = "0.1.0"
+description = "InvAI imaging service: personalization rendering, gang-sheet nesting and composing, print-file checks, mockups"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi>=0.141.1",
+  "uvicorn[standard]>=0.53.0",
+  "pyvips[binary]>=3.2.0",
+  "pillow>=12.3.0",
+  "rectpack>=0.2.2",
+  "qrcode>=8.2",
+  "boto3>=1.43.101",
+  "bullmq>=3.2.6",
+  "pydantic-settings>=2.15.0",
+  "httpx>=0.28.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "ruff>=0.16.8"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

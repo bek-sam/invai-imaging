@@ -1,0 +1,1 @@
+"""Compose a gang sheet with pyvips (streams tiles; a 22in x 20ft sheet is 6,600 x 72,000 px). Draws the order number, item, size/color and a QR code beside each design. Outputs PNG/PDF per vendor spec plus a low-res preview and deep-zoom tiles."""
