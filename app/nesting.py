@@ -1,12 +1,21 @@
-"""Gang-sheet nesting: pack design bounding boxes onto a fixed-width roll.
+"""Gang-sheet nesting: pack design boxes onto a fixed-width roll.
 
-v1 uses rectangle packing (MaxRects via rectpack) with 90-degree rotation.
-Shape-aware nesting (jagua-rs / sparrow) can replace it later.
+MaxRects (rectpack's free-rectangle bookkeeping) with our own placement choice, because a design's
+footprint is not a plain rectangle to rotate: the order label strip always sits *under* the placed
+design, so a rotated design of w x h occupies (h, w + label), not (h + label, w).
+
+Footprint of a design placed as pw x ph:  (pw + spacing) x (ph + label + spacing).
+The bin is (usable width + spacing) wide so the last column needs no trailing gap, and margins are
+kept clear on all four sides. Several heuristics and orderings are tried per sheet and the one that
+places the most area in the shortest length wins. Items that don't fit go to the next sheet.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from rectpack import newPacker
+from rectpack.geometry import Rectangle
+from rectpack.maxrects import MaxRects
+
+SCALE = 1000  # work in mils so rectpack deals with integers
 
 
 @dataclass(frozen=True)
@@ -14,11 +23,13 @@ class Item:
     id: str
     width_in: float
     height_in: float
+    quantity: int = 1
 
 
 @dataclass(frozen=True)
 class Placement:
     id: str
+    copy: int
     x_in: float
     y_in: float
     width_in: float
@@ -26,41 +37,158 @@ class Placement:
     rotated: bool
 
 
+@dataclass
+class Sheet:
+    index: int
+    length_in: float
+    utilization: float
+    placements: list[Placement] = field(default_factory=list)
+
+
+class NestError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class _Piece:
+    id: str
+    copy: int
+    w: int  # design size in mils, unrotated
+    h: int
+
+
+class _Bin(MaxRects):
+    def __init__(self, width: int, height: int):
+        super().__init__(width, height, rot=False)
+
+    def place(self, options, heuristic: str):
+        """options: [(fw, fh, rotated)]. Returns (Rectangle, rotated) or None."""
+        best = None
+        for m in self._max_rects:
+            for fw, fh, rotated in options:
+                if fw > m.width or fh > m.height:
+                    continue
+                if heuristic == "bl":
+                    score = (m.y + fh, m.x)
+                elif heuristic == "bssf":
+                    score = (min(m.width - fw, m.height - fh), m.y + fh)
+                else:  # "baf"
+                    score = (m.width * m.height - fw * fh, m.y + fh)
+                if best is None or score < best[0]:
+                    best = (score, Rectangle(m.x, m.y, fw, fh), rotated)
+        if best is None:
+            return None
+        rect = best[1]
+        self._split(rect)
+        self._remove_duplicates()
+        self.rectangles.append(rect)
+        return rect, best[2]
+
+
+_ORDERS = {
+    "height": lambda p: (-max(p.w, p.h), -p.w * p.h),
+    "area": lambda p: (-p.w * p.h, -max(p.w, p.h)),
+    "width": lambda p: (-p.w, -p.h),
+}
+
+
+def _mils(v: float) -> int:
+    return round(v * SCALE)
+
+
+def _pack_one(pieces, bin_w, bin_h, spacing, label, allow_rotation, heuristic):
+    b = _Bin(bin_w, bin_h)
+    placed, rest = [], []
+    for p in pieces:
+        options = [(p.w + spacing, p.h + label + spacing, False)]
+        if allow_rotation and p.w != p.h:
+            options.append((p.h + spacing, p.w + label + spacing, True))
+        res = b.place(options, heuristic)
+        if res is None:
+            rest.append(p)
+        else:
+            rect, rotated = res
+            placed.append((p, rect, rotated))
+    return placed, rest
+
+
 def nest(
     items: list[Item],
     sheet_width_in: float = 22.0,
     spacing_in: float = 0.25,
+    margin_in: float = 0.25,
     max_length_in: float = 240.0,
-    scale: int = 100,
-) -> tuple[list[Placement], float]:
-    """Place items on a strip `sheet_width_in` wide. Returns placements and used length.
+    allow_rotation: bool = True,
+    label_height_in: float = 0.35,
+) -> list[Sheet]:
+    if sheet_width_in <= 0 or max_length_in <= 0:
+        raise NestError("sheet_width_in and max_length_in must be positive")
+    if spacing_in < 0 or margin_in < 0 or label_height_in < 0:
+        raise NestError("spacing_in, margin_in and label_height_in must not be negative")
 
-    Sizes are converted to integer units (1/scale inch) because rectpack works best with ints.
-    Each item is padded by `spacing_in` so transfers can be cut apart.
-    """
-    pad = round(spacing_in * scale)
-    packer = newPacker(rotation=True)
-    for item in items:
-        packer.add_rect(round(item.width_in * scale) + pad, round(item.height_in * scale) + pad, item.id)
-    packer.add_bin(round(sheet_width_in * scale), round(max_length_in * scale))
-    packer.pack()
+    spacing, label, margin = _mils(spacing_in), _mils(label_height_in), _mils(margin_in)
+    usable_w = _mils(sheet_width_in) - 2 * margin
+    usable_h = _mils(max_length_in) - 2 * margin
+    if usable_w <= 0 or usable_h <= 0:
+        raise NestError("margins leave no usable area")
+    bin_w, bin_h = usable_w + spacing, usable_h + spacing
 
-    by_id = {i.id: i for i in items}
-    placements: list[Placement] = []
-    length = 0.0
-    for _bin, x, y, w, h, rid in packer.rect_list():
-        src = by_id[rid]
-        rotated = abs((w - pad) / scale - src.width_in) > 1 / scale
+    pieces: list[_Piece] = []
+    for it in items:
+        if it.width_in <= 0 or it.height_in <= 0:
+            raise NestError(f"item {it.id}: width_in and height_in must be positive")
+        if it.quantity < 1:
+            continue
+        w, h = _mils(it.width_in), _mils(it.height_in)
+        fits = w <= usable_w and h + label <= usable_h
+        if allow_rotation:
+            fits = fits or (h <= usable_w and w + label <= usable_h)
+        if not fits:
+            raise NestError(
+                f"item {it.id} ({it.width_in}x{it.height_in}in) does not fit a "
+                f"{sheet_width_in}x{max_length_in}in sheet"
+            )
+        pieces.extend(_Piece(it.id, c, w, h) for c in range(it.quantity))
+
+    sheets: list[Sheet] = []
+    remaining = pieces
+    while remaining:
+        best = None
+        for order in _ORDERS.values():
+            ordered = sorted(remaining, key=order)
+            for heuristic in ("bl", "bssf", "baf"):
+                placed, rest = _pack_one(
+                    ordered, bin_w, bin_h, spacing, label, allow_rotation, heuristic
+                )
+                area = sum(p.w * p.h for p, _, _ in placed)
+                used = max((r.y + r.height for _, r, _ in placed), default=0)
+                score = (-area, used)
+                if best is None or score < best[0]:
+                    best = (score, placed, rest)
+        _, placed, remaining = best
+        sheets.append(_to_sheet(len(sheets), placed, sheet_width_in, spacing, margin))
+    return sheets
+
+
+def _to_sheet(index, placed, sheet_width_in, spacing, margin) -> Sheet:
+    placements = []
+    used = 0
+    area = 0
+    for p, r, rotated in sorted(placed, key=lambda t: (t[1].y, t[1].x)):
+        pw, ph = (p.h, p.w) if rotated else (p.w, p.h)
         placements.append(
-            Placement(rid, x / scale, y / scale, (w - pad) / scale, (h - pad) / scale, rotated)
+            Placement(
+                id=p.id,
+                copy=p.copy,
+                x_in=(margin + r.x) / SCALE,
+                y_in=(margin + r.y) / SCALE,
+                width_in=pw / SCALE,
+                height_in=ph / SCALE,
+                rotated=rotated,
+            )
         )
-        length = max(length, (y + h) / scale)
-
-    if len(placements) != len(items):
-        raise ValueError("items do not fit within max_length_in; split into more sheets")
-    return placements, length
-
-
-def utilization(items: list[Item], length_in: float, sheet_width_in: float = 22.0) -> float:
-    used = sum(i.width_in * i.height_in for i in items)
-    return used / (sheet_width_in * length_in) if length_in else 0.0
+        used = max(used, r.y + r.height - spacing)
+        area += p.w * p.h
+    length = (used + 2 * margin) / SCALE
+    utilization = area / (SCALE * SCALE) / (sheet_width_in * length) if length else 0.0
+    return Sheet(index, round(length, 3), round(utilization, 4), placements)

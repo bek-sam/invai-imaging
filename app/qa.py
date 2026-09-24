@@ -1,1 +1,141 @@
-"""Print-file checks: effective DPI (flag < 150), semi-transparent pixel cleanup for DTF, minimum line thickness."""
+"""Print-file checks for DTF: effective DPI, transparency, soft alpha; and alpha cleanup."""
+
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+import pyvips
+
+from app.vips import ImageError, load, save_png, to_srgba
+
+DPI_ERROR = 150
+DPI_WARN = 300
+SOFT_ALPHA_WARN = 0.05  # anti-aliased edges alone are usually 1–3%
+TINY_BYTES = 2_048
+TINY_PX = 150
+
+
+@dataclass
+class Issue:
+    code: str
+    severity: str
+    message: str
+
+
+@dataclass
+class QAResult:
+    width_px: int = 0
+    height_px: int = 0
+    has_alpha: bool = False
+    soft_alpha_ratio: float = 0.0
+    effective_dpi: float | None = None
+    issues: list[Issue] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        if d["effective_dpi"] is None:
+            del d["effective_dpi"]
+        return d
+
+
+def effective_dpi(
+    width_px: int, height_px: int, target_width_in: float | None, target_height_in: float | None
+) -> float | None:
+    """DPI the file will have when printed at the target size (the limiting axis wins)."""
+    dpis = []
+    if target_width_in:
+        dpis.append(width_px / target_width_in)
+    if target_height_in:
+        dpis.append(height_px / target_height_in)
+    return round(min(dpis), 1) if dpis else None
+
+
+def alpha_histogram(img: pyvips.Image) -> list[int]:
+    alpha = to_srgba(img)[3]
+    hist = alpha.hist_find()
+    return list(memoryview(hist.write_to_memory()).cast("I"))
+
+
+def soft_alpha_ratio(hist: list[int]) -> float:
+    visible = sum(hist[1:])
+    return sum(hist[1:255]) / visible if visible else 0.0
+
+
+def check(
+    path: Path, target_width_in: float | None = None, target_height_in: float | None = None
+) -> QAResult:
+    res = QAResult()
+    size = path.stat().st_size
+    try:
+        img = load(path, access="sequential")
+        # Decode the pixels once so truncated files are caught here.
+        hist = alpha_histogram(img)
+    except (ImageError, pyvips.Error) as e:
+        msg = str(e).splitlines()[0] if str(e) else "unreadable image"
+        res.issues.append(Issue("unreadable", "error", msg))
+        return res
+
+    res.width_px, res.height_px = img.width, img.height
+    res.has_alpha = bool(img.hasalpha())
+    res.soft_alpha_ratio = round(soft_alpha_ratio(hist), 4) if res.has_alpha else 0.0
+    res.effective_dpi = effective_dpi(img.width, img.height, target_width_in, target_height_in)
+
+    if res.effective_dpi is not None:
+        if res.effective_dpi < DPI_ERROR:
+            res.issues.append(
+                Issue(
+                    "low_dpi",
+                    "error",
+                    f"{res.effective_dpi:.0f} DPI at the target size; at least {DPI_ERROR} is "
+                    f"needed and {DPI_WARN} is recommended",
+                )
+            )
+        elif res.effective_dpi < DPI_WARN:
+            res.issues.append(
+                Issue(
+                    "low_dpi",
+                    "warn",
+                    f"{res.effective_dpi:.0f} DPI at the target size; {DPI_WARN} is recommended",
+                )
+            )
+
+    fully_opaque = hist[255] == img.width * img.height
+    if not res.has_alpha or fully_opaque:
+        res.issues.append(
+            Issue(
+                "no_alpha",
+                "warn",
+                "no transparent background; the whole rectangle will print"
+                if not res.has_alpha
+                else "alpha channel is fully opaque; the whole rectangle will print",
+            )
+        )
+    elif res.soft_alpha_ratio > SOFT_ALPHA_WARN:
+        res.issues.append(
+            Issue(
+                "soft_alpha",
+                "warn",
+                f"{res.soft_alpha_ratio:.0%} of visible pixels are semi-transparent; they print "
+                "as a faint haze on DTF. Run clean-alpha",
+            )
+        )
+
+    if size < TINY_BYTES or min(img.width, img.height) < TINY_PX:
+        res.issues.append(
+            Issue(
+                "tiny_file",
+                "warn",
+                f"file is very small ({img.width}x{img.height}px, {size} bytes)",
+            )
+        )
+    return res
+
+
+def clean_alpha(src: Path, dest: Path, threshold: int = 128) -> None:
+    """Snap alpha to 0/255 (>= threshold becomes opaque) so DTF gets no half-printed pixels."""
+    if not 1 <= threshold <= 255:
+        raise ImageError("threshold must be between 1 and 255")
+    img = to_srgba(load(src, access="sequential"))
+    rgb, alpha = img.extract_band(0, n=3), img[3]
+    alpha = (alpha >= threshold).ifthenelse(255, 0).cast("uchar")
+    out = rgb.bandjoin(alpha).copy(interpretation="srgb", xres=img.xres, yres=img.yres)
+    save_png(out, dest)

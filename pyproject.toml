@@ -11,13 +11,19 @@ dependencies = [
   "rectpack>=0.2.2",
   "qrcode>=8.2",
   "boto3>=1.43.101",
-  "bullmq>=3.2.6",
   "pydantic-settings>=2.15.0",
-  "httpx>=0.28.1",
+  "reportlab>=5.0.1",
 ]
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ruff>=0.16.8"]
+dev = [
+    "httpx2>=2.13.1",
+    "moto[s3]>=5.2.3",
+    "pypdf>=6.19.0",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+    "zxing-cpp>=3.1.1",
+]
 
 [tool.ruff]
 line-length = 100
