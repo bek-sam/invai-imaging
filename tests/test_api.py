@@ -211,3 +211,20 @@ def test_errors_are_422_with_detail(client):
     )
     assert r.status_code == 422
     assert "outside the sheet" in r.json()["detail"]
+
+
+def test_sample_art_every_style_fits_narrow_sleeve_art(client):
+    # Each text hashes to a different style; a 3x10 in sleeve must not break any of them.
+    for i, text in enumerate(["Tucson Old Pueblo", "Lake Powell Weekend", "Howdy", "Rodeo Nights"]):
+        r = client.post(
+            "/sample-art",
+            json={
+                "text": text,
+                "out_key": f"t/sleeve{i}.png",
+                "width_in": 3,
+                "height_in": 10,
+                "dpi": 100,
+                "color_hex": "#9c5b3a",
+            },
+        )
+        assert r.status_code == 200, (text, r.text)

@@ -96,13 +96,31 @@ def _mils(v: float) -> int:
     return round(v * SCALE)
 
 
-def _pack_one(pieces, bin_w, bin_h, spacing, label, allow_rotation, heuristic):
+# How a piece may be oriented: both ways, never rotated, or pre-rotated so that the most copies
+# fit across the width (a 10.5 x 12 in front goes two-up on 22 in film; rotated it goes one-up).
+_ROTATIONS = ("free", "none", "across")
+
+
+def _options(p, bin_w, spacing, label, rotation):
+    upright = (p.w + spacing, p.h + label + spacing, False)
+    if rotation == "none" or p.w == p.h:
+        return [upright]
+    turned = (p.h + spacing, p.w + label + spacing, True)
+    if rotation == "free":
+        return [upright, turned]
+    across_upright, across_turned = bin_w // upright[0], bin_w // turned[0]
+    if across_turned > across_upright:
+        return [turned]
+    if across_upright > across_turned:
+        return [upright]
+    return [upright, turned]
+
+
+def _pack_one(pieces, bin_w, bin_h, spacing, label, rotation, heuristic):
     b = _Bin(bin_w, bin_h)
     placed, rest = [], []
     for p in pieces:
-        options = [(p.w + spacing, p.h + label + spacing, False)]
-        if allow_rotation and p.w != p.h:
-            options.append((p.h + spacing, p.w + label + spacing, True))
+        options = _options(p, bin_w, spacing, label, rotation)
         res = b.place(options, heuristic)
         if res is None:
             rest.append(p)
@@ -154,17 +172,19 @@ def nest(
     remaining = pieces
     while remaining:
         best = None
+        rotations = _ROTATIONS if allow_rotation else ("none",)
         for order in _ORDERS.values():
             ordered = sorted(remaining, key=order)
-            for heuristic in ("bl", "bssf", "baf"):
-                placed, rest = _pack_one(
-                    ordered, bin_w, bin_h, spacing, label, allow_rotation, heuristic
-                )
-                area = sum(p.w * p.h for p, _, _ in placed)
-                used = max((r.y + r.height for _, r, _ in placed), default=0)
-                score = (-area, used)
-                if best is None or score < best[0]:
-                    best = (score, placed, rest)
+            for rotation in rotations:
+                for heuristic in ("bl", "bssf", "baf"):
+                    placed, rest = _pack_one(
+                        ordered, bin_w, bin_h, spacing, label, rotation, heuristic
+                    )
+                    area = sum(p.w * p.h for p, _, _ in placed)
+                    used = max((r.y + r.height for _, r, _ in placed), default=0)
+                    score = (-area, used)
+                    if best is None or score < best[0]:
+                        best = (score, placed, rest)
         _, placed, remaining = best
         sheets.append(_to_sheet(len(sheets), placed, sheet_width_in, spacing, margin))
     return sheets

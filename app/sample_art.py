@@ -109,14 +109,16 @@ def render_sample_art(text: str, width_px: int, height_px: int, color_hex: str) 
         )
     if style == "stars":
         band = round((box_y1 - box_y0) * 0.16)
-        r = band * 0.42
+        # Three stars span about 7.7r; cap r so they also fit narrow (sleeve) art.
+        r = min(band * 0.42, (box_x1 - box_x0) / 9)
         cx = width_px / 2
         for dx in (-2.2, 0, 2.2):
             _star(draw, cx + dx * r * 1.3, box_y1 - band / 2, r, color)
         bar_h = max(3, round(band * 0.12))
         y = box_y1 - band / 2
-        draw.rectangle((box_x0, y - bar_h / 2, cx - 3.6 * r, y + bar_h / 2), fill=color)
-        draw.rectangle((cx + 3.6 * r, y - bar_h / 2, box_x1, y + bar_h / 2), fill=color)
+        if cx - 3.6 * r > box_x0:
+            draw.rectangle((box_x0, y - bar_h / 2, cx - 3.6 * r, y + bar_h / 2), fill=color)
+            draw.rectangle((cx + 3.6 * r, y - bar_h / 2, box_x1, y + bar_h / 2), fill=color)
         box_y1 -= band + pad // 2
 
     box_w, box_h = box_x1 - box_x0, box_y1 - box_y0

@@ -104,3 +104,25 @@ def test_utilization_reasonable_for_realistic_batch():
     sheets = nest(items)
     assert_valid(sheets)
     assert sheets[0].utilization > 0.7
+
+
+def test_adult_fronts_go_two_up_on_22in_film():
+    # 10.5 x 12 in fronts fit two across only when kept upright; rotating them wastes a column.
+    sheets = nest([Item("front", 10.5, 12, quantity=16)])
+    assert_valid(sheets)
+    assert len(sheets) == 1
+    assert sheets[0].length_in < 110
+    assert sheets[0].utilization >= 0.85
+
+
+def test_realistic_size_mix_nests_dense():
+    items = [
+        Item("adult", 10.5, 12, quantity=22),
+        Item("back", 12, 14, quantity=4),
+        Item("chest", 3.75, 3.75, quantity=3),
+        Item("sleeve", 3, 10, quantity=3),
+        Item("youth", 8.5, 9.5, quantity=3),
+    ]
+    sheets = nest(items)
+    assert_valid(sheets)
+    assert sheets[0].utilization >= 0.8
