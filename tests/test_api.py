@@ -130,6 +130,22 @@ def test_full_flow(client):
     assert (float(page.mediabox.width), float(page.mediabox.height)) == (288, 432)
     assert "NOT A REAL LABEL" in page.extract_text()
 
+    r = client.post(
+        "/labels/qr",
+        json={
+            "items": [
+                {"code": "BIN:A1", "caption": "Bin A1", "size": "4x6"},
+                {"code": "B:00000000-0000-0000-0000-000000000001", "size": "2x1"},
+            ],
+            "out_key": "t/qr-labels.pdf",
+        },
+    )
+    assert r.json() == {"key": "t/qr-labels.pdf"}
+    pages = PdfReader(ROOT / "t/qr-labels.pdf").pages
+    assert len(pages) == 2
+    assert (float(pages[0].mediabox.width), float(pages[0].mediabox.height)) == (288, 432)
+    assert (float(pages[1].mediabox.width), float(pages[1].mediabox.height)) == (144, 72)
+
 
 def test_personalization_endpoint(client):
     r = client.post(

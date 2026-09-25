@@ -3,13 +3,30 @@
 import io
 from dataclasses import dataclass
 
+import qrcode
 from reportlab.graphics.barcode import code128
 from reportlab.lib.colors import Color, black, white
 from reportlab.lib.units import inch
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 W, H = 4 * inch, 6 * inch
 PAD = 0.16 * inch
+
+# Bin (`BIN:<code>`) and blank (`B:<variantId>`) QR labels: production.bins.labels and
+# inventory.blankLabels both render through here. Sizes are the physical label stock a shop
+# might use: a 4x6 shelf label or a small 2x1 sticker.
+QR_LABEL_SIZES_IN: dict[str, tuple[float, float]] = {
+    "4x6": (4 * inch, 6 * inch),
+    "2x1": (2 * inch, 1 * inch),
+}
+
+
+@dataclass
+class QrLabelItem:
+    code: str  # the literal string encoded in the QR and printed underneath (e.g. "BIN:A1")
+    caption: str | None
+    size: str  # "4x6" | "2x1"
 
 
 @dataclass
@@ -122,5 +139,64 @@ def render_label(
     c.drawCentredString(W / 2, y - 0.2 * inch, "SAMPLE — NOT A REAL LABEL — DO NOT SHIP")
 
     c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def _qr_reader(data: str, box_size: int = 6) -> ImageReader:
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=box_size, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    return ImageReader(qr.make_image(fill_color="black", back_color="white").convert("RGB"))
+
+
+def render_qr_labels(items: list[QrLabelItem]) -> bytes:
+    """Merged PDF, one QR label per page, each at its own requested physical size (`4x6`/`2x1`).
+
+    The QR encodes `item.code` verbatim (`BIN:<code>` or `B:<variantId>`) — the same prefixes the
+    floor scanner already reads, so a printed label just works there.
+    """
+    if not items:
+        raise ValueError("no items")
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=QR_LABEL_SIZES_IN[items[0].size])
+    c.setTitle("InvAI labels")
+    c.setAuthor("InvAI")
+    for item in items:
+        w, h = QR_LABEL_SIZES_IN[item.size]
+        c.setPageSize((w, h))
+        pad = 0.08 * inch
+        if item.size == "2x1":
+            qr_side = h - 2 * pad
+            c.drawImage(
+                _qr_reader(item.code), pad, pad, qr_side, qr_side, preserveAspectRatio=True
+            )
+            x = pad + qr_side + pad
+            avail = w - x - pad
+            if item.caption:
+                size = _fit(c, item.caption, "Helvetica-Bold", 12, avail)
+                c.setFont("Helvetica-Bold", size)
+                c.drawString(x, h / 2 + 2, item.caption[:40])
+            c.setFont("Helvetica", 6)
+            c.drawString(x, h / 2 - 8, item.code[:40])
+        else:
+            qr_side = min(w - 2 * pad, h * 0.6)
+            c.drawImage(
+                _qr_reader(item.code),
+                (w - qr_side) / 2,
+                h - pad - qr_side,
+                qr_side,
+                qr_side,
+                preserveAspectRatio=True,
+            )
+            y = h - pad - qr_side - 0.3 * inch
+            if item.caption:
+                size = _fit(c, item.caption, "Helvetica-Bold", 16, w - 2 * pad)
+                c.setFont("Helvetica-Bold", size)
+                c.drawCentredString(w / 2, y, item.caption[:60])
+                y -= 0.24 * inch
+            c.setFont("Courier", 9)
+            c.drawCentredString(w / 2, y, item.code[:60])
+        c.showPage()
     c.save()
     return buf.getvalue()
