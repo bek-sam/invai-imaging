@@ -133,7 +133,7 @@ def test_full_flow(client):
     r = client.post(
         "/labels/qr",
         json={
-            "items": [
+            "labels": [
                 {"code": "BIN:A1", "caption": "Bin A1", "size": "4x6"},
                 {"code": "B:00000000-0000-0000-0000-000000000001", "size": "2x1"},
             ],

@@ -336,7 +336,7 @@ class QrLabelItemModel(BaseModel):
 
 
 class QrLabelsRequest(BaseModel):
-    items: list[QrLabelItemModel] = Field(min_length=1, max_length=200)
+    labels: list[QrLabelItemModel] = Field(min_length=1, max_length=200)
     out_key: str
 
 
@@ -344,7 +344,7 @@ class QrLabelsRequest(BaseModel):
 def label_qr(req: QrLabelsRequest) -> dict:
     """Merged PDF of `BIN:`/`B:` QR labels for production.bins.labels and inventory.blankLabels."""
     pdf = labels.render_qr_labels(
-        [labels.QrLabelItem(code=i.code, caption=i.caption, size=i.size) for i in req.items]
+        [labels.QrLabelItem(code=i.code, caption=i.caption, size=i.size) for i in req.labels]
     )
     get_storage().put_bytes(pdf, req.out_key)
     return {"key": req.out_key}
