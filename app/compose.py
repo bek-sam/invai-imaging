@@ -8,9 +8,10 @@ the preview are then streamed from the saved PNG.
 
 Under each design (inside the label strip that nesting reserved) we print a QR code with the
 transfer_id and "order_no · item_no · size · color · design", plus REPRINT when flagged. A thin
-dashed cut guide marks `label_gap_in` (the clear film between the design and its label), and an
-optional header strip at the top of the sheet carries a second QR (plus text) for `filename_hint`
-so a RIP or a human can look the job up by name or by scanning the code (B-79).
+dashed cut guide marks `label_gap_in` (the clear film between the design and its label). A
+dedicated top-edge header band, `header_height_in` tall (nesting starts placements below it,
+not just below margin_in), carries a second QR (plus text) for `filename_hint` when given, so a
+RIP or a human can look the job up by name or by scanning the code (B-79).
 
 Every transfer-label QR is drawn from a raster of at least `QR_MIN_DPI`, whatever the sheet's own
 `dpi` is, and every module is held to at least `MIN_MODULE_MM` -- when the label strip is too
@@ -33,7 +34,7 @@ from app.vips import MM_PER_IN, ImageError, load, save_png, set_dpi, to_srgba, w
 DEFAULT_LABEL_GAP_IN = 0.125  # clear film between the design and its label (SheetSpec.labelGapIn)
 MIN_MODULE_MM = 0.33  # AC1 (tech lead, 2026-09-26): 13 mil, a common handheld-scanner minimum
 QR_MIN_DPI = 300  # AC1: transfer-label QRs are drawn from at least this raster density
-HEADER_MAX_IN = 1.0  # header strip cap, even if the sheet's top margin is unusually generous
+DEFAULT_HEADER_HEIGHT_IN = 0.45  # top-edge header band; nesting reserves this before margin_in
 INK = (17, 17, 17, 255)
 REPRINT_RED = (220, 38, 38, 255)
 CUT_GUIDE_COLOR = (120, 120, 120, 200)
@@ -251,6 +252,7 @@ def compose_sheet(
     preview_width_px: int,
     label_gap_in: float = DEFAULT_LABEL_GAP_IN,
     filename_hint: str | None = None,
+    header_height_in: float = DEFAULT_HEADER_HEIGHT_IN,
 ) -> ComposeResult:
     started = time.monotonic()
     W, H = round(width_in * dpi), round(length_in * dpi)
@@ -265,10 +267,10 @@ def compose_sheet(
         layers: list[tuple[Path, int, int]] = []
 
         if filename_hint:
-            # Fit inside whatever clearance the caller already left above the first placement
-            # (the sheet's top margin) -- never a fixed height that could bleed into a design.
-            top_clear_px = min((round(p.y_in * dpi) for p in placements), default=H)
-            header_h = min(top_clear_px, round(HEADER_MAX_IN * dpi), H)
+            # A dedicated top-edge band (tech lead, 2026-09-26): nesting reserves exactly this
+            # much before the first placement, so -- unlike the old "infer it from the topmost
+            # placement's y_in" approach -- compose can just trust header_height_in directly.
+            header_h = min(round(header_height_in * dpi), H)
             if header_h >= 8:
                 hpath = tmp / "header.png"
                 render_header(filename_hint, W, header_h, dpi).save(hpath, compress_level=1)

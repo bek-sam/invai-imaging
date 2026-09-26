@@ -249,7 +249,8 @@ def test_compose_header_decodes(tmp_path):
     solid_design(tmp_path / "store" / "a.png", 600, 900)
     tid = "11111111-2222-3333-4444-555555555555"
     filename_hint = "SH-1042_DB-1001"
-    # Enough top clearance (y_in=1.0) for the header QR to clear its own module floor.
+    # header_height_in is a dedicated top-edge band now (tech lead, 2026-09-26): it no longer
+    # depends on the placement's y_in, just kept generous here so nothing overlaps the header.
     placements = [
         ComposePlacement(
             tid,
@@ -303,3 +304,55 @@ def test_compose_without_filename_hint_has_no_header(tmp_path):
     sheet = pyvips.Image.new_from_file(str(tmp_path / "store/n/o.png"))
     # the top margin band stays fully transparent -- no header was drawn
     assert sheet.getpoint(10, 10)[3] == 0
+
+
+@pytest.mark.parametrize("dpi", [150, 200, 300])
+def test_default_settings_header_and_transfer_qrs_all_decode(tmp_path, dpi):
+    """Tech lead follow-up: a dedicated top header_height_in band (default 0.45in, nesting
+    starts below it) instead of growing margin_in on every side. Proves the whole pipeline at
+    *default* settings -- real nesting.nest() placements, default label_height_in/label_gap_in/
+    header_height_in in compose_sheet -- decodes both the header and every transfer QR, with
+    fresh random UUIDs, at 150/200/300 DPI.
+    """
+    import uuid
+
+    from app.nesting import Item
+    from app.nesting import nest as nest_fn
+
+    tids = [str(uuid.uuid4()) for _ in range(2)]
+    sheets = nest_fn([Item(tid, 2.0, 3.0) for tid in tids])  # nesting.nest()'s own defaults
+    sheet = sheets[0]
+
+    store = LocalStorage(tmp_path / "store" / str(dpi))
+    solid_design(tmp_path / "store" / str(dpi) / "a.png", 600, 900)
+    filename_hint = "SH-DEFAULT DB-1 DB-2"
+    placements = [
+        ComposePlacement(
+            p.id,
+            "a.png",
+            p.x_in,
+            p.y_in,
+            p.width_in,
+            p.height_in,
+            p.rotated,
+            Label("DB-1", "1/1", "M", "Black", "Cactus"),
+        )
+        for p in sheet.placements
+    ]
+    compose_sheet(
+        store,
+        22.0,
+        sheet.length_in,
+        dpi,
+        placements,
+        0.42,  # matches nesting.nest()'s and ComposeRequest's default label_height_in
+        "o.png",
+        None,
+        "p.png",
+        100,
+        filename_hint=filename_hint,  # label_gap_in and header_height_in: compose's own defaults
+    )
+    pil = Image.open(tmp_path / "store" / str(dpi) / "o.png").convert("RGB")
+    found = {r.text for r in zxingcpp.read_barcodes(pil)}
+    assert set(tids) <= found
+    assert filename_hint in found

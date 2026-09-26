@@ -138,17 +138,22 @@ def nest(
     max_length_in: float = 240.0,
     allow_rotation: bool = True,
     label_height_in: float = 0.42,
+    header_height_in: float = 0.45,
 ) -> list[Sheet]:
     if sheet_width_in <= 0 or max_length_in <= 0:
         raise NestError("sheet_width_in and max_length_in must be positive")
-    if spacing_in < 0 or margin_in < 0 or label_height_in < 0:
-        raise NestError("spacing_in, margin_in and label_height_in must not be negative")
+    if spacing_in < 0 or margin_in < 0 or label_height_in < 0 or header_height_in < 0:
+        raise NestError(
+            "spacing_in, margin_in, label_height_in and header_height_in must not be negative"
+        )
 
     spacing, label, margin = _mils(spacing_in), _mils(label_height_in), _mils(margin_in)
+    header = _mils(header_height_in)
+    # The header strip is a fixed top-edge band, above the margin: nesting starts below both.
     usable_w = _mils(sheet_width_in) - 2 * margin
-    usable_h = _mils(max_length_in) - 2 * margin
+    usable_h = _mils(max_length_in) - 2 * margin - header
     if usable_w <= 0 or usable_h <= 0:
-        raise NestError("margins leave no usable area")
+        raise NestError("margins and header leave no usable area")
     bin_w, bin_h = usable_w + spacing, usable_h + spacing
 
     pieces: list[_Piece] = []
@@ -186,11 +191,11 @@ def nest(
                     if best is None or score < best[0]:
                         best = (score, placed, rest)
         _, placed, remaining = best
-        sheets.append(_to_sheet(len(sheets), placed, sheet_width_in, spacing, margin))
+        sheets.append(_to_sheet(len(sheets), placed, sheet_width_in, spacing, margin, header))
     return sheets
 
 
-def _to_sheet(index, placed, sheet_width_in, spacing, margin) -> Sheet:
+def _to_sheet(index, placed, sheet_width_in, spacing, margin, header) -> Sheet:
     placements = []
     used = 0
     area = 0
@@ -201,7 +206,7 @@ def _to_sheet(index, placed, sheet_width_in, spacing, margin) -> Sheet:
                 id=p.id,
                 copy=p.copy,
                 x_in=(margin + r.x) / SCALE,
-                y_in=(margin + r.y) / SCALE,
+                y_in=(margin + header + r.y) / SCALE,
                 width_in=pw / SCALE,
                 height_in=ph / SCALE,
                 rotated=rotated,
@@ -209,6 +214,6 @@ def _to_sheet(index, placed, sheet_width_in, spacing, margin) -> Sheet:
         )
         used = max(used, r.y + r.height - spacing)
         area += p.w * p.h
-    length = (used + 2 * margin) / SCALE
+    length = (used + 2 * margin + header) / SCALE
     utilization = area / (SCALE * SCALE) / (sheet_width_in * length) if length else 0.0
     return Sheet(index, round(length, 3), round(utilization, 4), placements)

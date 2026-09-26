@@ -260,6 +260,7 @@ class NestRequest(BaseModel):
     max_length_in: float = Field(240.0, gt=0, le=240)
     allow_rotation: bool = True
     label_height_in: float = Field(0.42, ge=0, le=6)
+    header_height_in: float = Field(0.45, ge=0, le=6)
 
     @model_validator(mode="after")
     def _bounded_copies(self) -> "NestRequest":
@@ -279,6 +280,7 @@ def nest(req: NestRequest) -> dict:
         max_length_in=req.max_length_in,
         allow_rotation=req.allow_rotation,
         label_height_in=req.label_height_in,
+        header_height_in=req.header_height_in,
     )
     return {
         "sheets": [
@@ -328,6 +330,7 @@ class ComposeRequest(BaseModel):
     preview_width_px: int = Field(1200, ge=16, le=8000)
     label_gap_in: float = Field(compose.DEFAULT_LABEL_GAP_IN, ge=0, le=1)
     filename_hint: str | None = Field(None, max_length=150)
+    header_height_in: float = Field(0.45, ge=0, le=6)
 
     @model_validator(mode="after")
     def _pdf_length_cap(self) -> "ComposeRequest":
@@ -368,6 +371,7 @@ def compose_sheet(req: ComposeRequest) -> dict:
         preview_width_px=req.preview_width_px,
         label_gap_in=req.label_gap_in,
         filename_hint=req.filename_hint,
+        header_height_in=req.header_height_in,
     )
     out = {
         "key": req.out_key,

@@ -5,6 +5,7 @@ from app.nesting import Item, NestError, nest
 LABEL = 0.42
 SPACING = 0.25
 MARGIN = 0.25
+HEADER = 0.45
 EPS = 1e-6
 
 
@@ -21,11 +22,13 @@ def footprints(sheet, spacing=SPACING, label=LABEL):
     ]
 
 
-def assert_valid(sheets, width=22.0, max_len=240.0, spacing=SPACING, label=LABEL, margin=MARGIN):
+def assert_valid(
+    sheets, width=22.0, max_len=240.0, spacing=SPACING, label=LABEL, margin=MARGIN, header=HEADER
+):
     for s in sheets:
         for p in s.placements:
             assert p.x_in >= margin - EPS
-            assert p.y_in >= margin - EPS
+            assert p.y_in >= margin + header - EPS
             assert p.x_in + p.width_in <= width - margin + EPS
             assert p.y_in + p.height_in + label <= s.length_in - margin + EPS
         assert s.length_in <= max_len + EPS
@@ -58,8 +61,8 @@ def test_quantity_expansion_and_copy_numbers():
 
 def test_true_used_length_not_bin_height():
     sheets = nest([Item("a", 10, 10)])
-    # margin + design + label + margin; no trailing spacing
-    assert sheets[0].length_in == pytest.approx(MARGIN + 10 + LABEL + MARGIN)
+    # margin + header + design + label + margin; no trailing spacing
+    assert sheets[0].length_in == pytest.approx(MARGIN + HEADER + 10 + LABEL + MARGIN)
     assert sheets[0].utilization == pytest.approx(100 / (22 * sheets[0].length_in), abs=1e-4)
 
 
