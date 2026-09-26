@@ -31,8 +31,8 @@ request validation errors and missing keys (`file not found: <key>`).
 | `POST /qa/check` | `{file_key, target_width_in?, target_height_in?}` | `{width_px, height_px, has_alpha, soft_alpha_ratio, effective_dpi?, issues: [{code, severity, message}]}` |
 | `POST /qa/clean-alpha` | `{file_key, out_key, threshold=128}` | `{key}` |
 | `POST /render/personalization` | `{template: {width_in, height_in, background_key?, slots: [...]}, values, out_key, dpi=300}` | `{key, width_px, height_px, flags: [{slot, code, message}]}` |
-| `POST /nest` | `{items: [{id, width_in, height_in, quantity=1}], sheet_width_in=22, spacing_in=0.25, margin_in=0.25, max_length_in=240, allow_rotation=true, label_height_in=0.35}` | `{sheets: [{index, length_in, utilization, placements: [{id, copy, x_in, y_in, width_in, height_in, rotated}]}]}` |
-| `POST /compose` | `{width_in, length_in, dpi=300, placements: [{transfer_id, file_key, x_in, y_in, width_in, height_in, rotated, label: {order_no, item_no, size, color, design, reprint}}], label_height_in=0.35, out_key, pdf_key?, preview_key, preview_width_px=1200}` | `{key, pdf_key?, preview_key, width_px, height_px, bytes}` |
+| `POST /nest` | `{items: [{id, width_in, height_in, quantity=1}], sheet_width_in=22, spacing_in=0.25, margin_in=0.25, max_length_in=240, allow_rotation=true, label_height_in=0.42}` | `{sheets: [{index, length_in, utilization, placements: [{id, copy, x_in, y_in, width_in, height_in, rotated}]}]}` |
+| `POST /compose` | `{width_in, length_in, dpi=300, placements: [{transfer_id, file_key, x_in, y_in, width_in, height_in, rotated, label: {order_no, item_no, size, color, design, reprint}}], label_height_in=0.42, out_key, pdf_key?, preview_key, preview_width_px=1200}` | `{key, pdf_key?, preview_key, width_px, height_px, bytes}` |
 | `POST /mockup` | `{design_key, blank_color_hex, placement: "front"\|"back", out_key, size_px=1200}` | `{key}` |
 | `POST /labels/mock` | `{shipment_id, carrier, service, tracking_code, from, to, weight_oz, out_key}` (addresses: `name, city, state, zip`) | `{key}` |
 | `POST /sample-art` | `{text, out_key, width_in, height_in, dpi=300, color_hex="#111111"}` | `{key}` |
@@ -52,7 +52,7 @@ request validation errors and missing keys (`file not found: <key>`).
   clockwise when `rotated`. Under each design, inside the label strip: an opaque white QR code
   encoding `transfer_id` exactly, then `order_no · item_no · size · color · design` (shrunk then
   ellipsized to the design's width) and a red `REPRINT` line when flagged. `label_height_in`
-  (default 0.35) must match what was passed to `/nest`. The PNG is RGBA with a transparent
+  (default 0.42) must match what was passed to `/nest`. The PNG is RGBA with a transparent
   background and 300 DPI metadata; the PDF is one page at the exact physical size (sheets over
   200in use PDF `/UserUnit`, since plain PDF pages top out at 200in); the preview is
   `preview_width_px` wide, transparent, with the sheet's aspect ratio.
