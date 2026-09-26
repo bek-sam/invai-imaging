@@ -18,9 +18,9 @@ from app.vips import ImageError
 from tests.helpers import solid_design
 
 DPI = 300
-# Content height (label_height_in - label_gap_in) tall enough for a UUID transfer_id's QR to
-# clear the AC1 0.5mm/module floor at the default label_gap_in (0.125in): see
-# test_qr_module_floor_is_dpi_independent for the exact boundary this margin sits above.
+# label_height_in tall enough for a real (random) UUID transfer_id's QR to clear the AC1
+# 0.33mm/module floor -- the *default* 0.35in isn't quite enough for a worst-case UUID (see
+# test_qr_module_floor_is_dpi_independent and the T-9-2 report's "AC1 finding").
 LABEL_HEIGHT_IN = 0.8
 GAP_IN = 0.125
 
@@ -118,10 +118,12 @@ def test_qr_min_side_in_matches_matrix_size():
 
 
 def test_qr_module_floor_is_dpi_independent():
-    """The 0.5mm/module floor is pure geometry (module count x mm), not a function of DPI."""
+    """The 0.33mm/module floor is pure geometry (module count x mm), not a function of DPI."""
+    from app.compose import MIN_MODULE_MM
+
     tid = "11111111-2222-3333-4444-555555555555"
     min_side_in = qr_min_side_in(tid)
-    assert min_side_in > 0.5  # a UUID needs more than a single 0.5mm module, obviously
+    assert min_side_in > MIN_MODULE_MM / 25.4  # needs more than a single module, obviously
     for dpi in (150, 300, 600):
         from app.compose import qr_image
 
@@ -139,11 +141,14 @@ def test_compose_fails_loudly_when_label_strip_too_short(tmp_path):
     placements = [
         ComposePlacement(tid, "a.png", 0.25, 0.25, 2.0, 3.0, False, None),
     ]
+    # label_gap_in only positions the label below the design now (AC3); it no longer shrinks the
+    # label's own content height (AC1 needs every bit of label_height_in), so the boundary is
+    # qr_min_side_in itself, not label_height_in - label_gap_in.
     min_side_in = qr_min_side_in(tid)
 
-    # Just below the label-strip height that would give a 0.5mm-module QR: ImageError, not a
+    # Just below the label-strip height that would give a 0.33mm-module QR: ImageError, not a
     # silently-shrunk, unscannable code.
-    too_short = min_side_in + GAP_IN - 0.02
+    too_short = min_side_in - 0.02
     with pytest.raises(ImageError, match="scannable"):
         compose_sheet(
             store,
@@ -160,7 +165,7 @@ def test_compose_fails_loudly_when_label_strip_too_short(tmp_path):
         )
 
     # Just above it: succeeds and the QR decodes.
-    ok_height = min_side_in + GAP_IN + 0.02
+    ok_height = min_side_in + 0.02
     compose_sheet(
         store,
         6.0,
@@ -177,6 +182,31 @@ def test_compose_fails_loudly_when_label_strip_too_short(tmp_path):
     pil = Image.open(tmp_path / "store/ok/o.png").convert("RGB")
     found = {r.text for r in zxingcpp.read_barcodes(pil)}
     assert found == {tid}
+
+
+@pytest.mark.parametrize("dpi", [150, 200, 300])
+def test_default_label_height_still_short_for_a_real_uuid(tmp_path, dpi):
+    """Documents the T-9-2 report's "AC1 finding": at the *default* label_height_in (0.35in)
+    and label_gap_in (0.125in), a real (random) UUID transfer_id -- 31 modules with the quiet
+    zone kept -- needs 0.403in of label content, whatever the DPI (geometry, not raster). That's
+    still 0.053in short of the 0.35in default, so default `/compose` calls 422 on a real UUID
+    until label_height_in's shared default (imaging NestRequest/ComposeRequest, backend
+    LABEL_HEIGHT_IN) is raised -- outside this card's owned/granted paths. Once that lands,
+    drop the `pytest.raises` here and assert the QR decodes, matching
+    test_compose_qr_decodes_at_multiple_dpi.
+    """
+    import uuid
+
+    store = LocalStorage(tmp_path / "store" / str(dpi))
+    solid_design(tmp_path / "store" / str(dpi) / "a.png", 600, 900)
+    tid = str(uuid.uuid4())
+    placements = [
+        ComposePlacement(
+            tid, "a.png", 0.25, 0.25, 2.0, 3.0, False, Label("DB-1", "1/1", "M", "Black", "Cactus")
+        )
+    ]
+    with pytest.raises(ImageError, match="scannable"):
+        compose_sheet(store, 6.0, 4.0, dpi, placements, 0.35, "o.png", None, "p.png", 100)
 
 
 @pytest.mark.parametrize("dpi", [150, 200, 300])

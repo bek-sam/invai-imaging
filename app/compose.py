@@ -31,7 +31,7 @@ from app.storage import NotFoundError, Storage
 from app.vips import MM_PER_IN, ImageError, load, save_png, set_dpi, to_srgba, workdir
 
 DEFAULT_LABEL_GAP_IN = 0.125  # clear film between the design and its label (SheetSpec.labelGapIn)
-MIN_MODULE_MM = 0.5  # AC1: every QR module must be at least this big, printed
+MIN_MODULE_MM = 0.33  # AC1 (tech lead, 2026-09-26): 13 mil, a common handheld-scanner minimum
 QR_MIN_DPI = 300  # AC1: transfer-label QRs are drawn from at least this raster density
 HEADER_MAX_IN = 1.0  # header strip cap, even if the sheet's top margin is unusually generous
 INK = (17, 17, 17, 255)
@@ -79,7 +79,11 @@ def label_text(label: Label) -> str:
 
 
 def _qr_matrix(data: str) -> list[list[bool]]:
-    # The label strip is short, so the quiet zone is compressed to a single module.
+    # The label strip is short, so the quiet zone is compressed to a single module. Tried
+    # dropping it to `border=0` to buy more room, but verified live that it stops decoding once
+    # embedded in a real composed sheet (the QR's own corners then touch the sheet's background
+    # directly, with no white margin left to separate the finder patterns from it) -- so the
+    # quiet zone stays; AC1's floor is honored by the label strip's *height*, not by cutting this.
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=1, border=1)
     qr.add_data(data)
     qr.make(fit=True)
@@ -134,7 +138,10 @@ def header_qr_image(data: str, avail_px: int, dpi: float) -> Image.Image | None:
     """Same construction as `qr_image`, but returns None instead of raising: a header that can't
     fit a legible QR is dropped, it never fails the whole compose (unlike a transfer label)."""
     matrix = _qr_matrix(data)
-    if avail_px <= 0 or avail_px / dpi < len(matrix) * MIN_MODULE_MM / MM_PER_IN:
+    if avail_px <= 0:
+        return None
+    avail_in = avail_px / dpi
+    if avail_in < len(matrix) * MIN_MODULE_MM / MM_PER_IN:
         return None
     return _qr_bitmap(matrix, avail_px, dpi)
 
@@ -291,7 +298,12 @@ def compose_sheet(
             layers.append((vpath, x + (w - vw) // 2, y + (h - vh) // 2))
 
             gap_px = round(label_gap_in * dpi)
-            label_h = round((label_height_in - label_gap_in) * dpi)
+            # label_gap_in positions the label (and the cut guide) below the design; it does not
+            # shrink the label's own content height -- AC1's module floor needs every bit of
+            # label_height_in, and nesting already leaves spacing_in of clear sheet after the
+            # label, which comfortably absorbs gap_px at the vendor-spec defaults (0.125in <=
+            # spacing_in's 0.25in default).
+            label_h = round(label_height_in * dpi)
             label_y = y + h + gap_px
             guide_h = max(1, round(0.006 * dpi))
             if gap_px > guide_h + 1:
