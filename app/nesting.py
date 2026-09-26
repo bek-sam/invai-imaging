@@ -137,7 +137,7 @@ def nest(
     margin_in: float = 0.25,
     max_length_in: float = 240.0,
     allow_rotation: bool = True,
-    label_height_in: float = 0.35,
+    label_height_in: float = 0.42,
 ) -> list[Sheet]:
     if sheet_width_in <= 0 or max_length_in <= 0:
         raise NestError("sheet_width_in and max_length_in must be positive")
