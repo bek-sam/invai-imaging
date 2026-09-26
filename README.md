@@ -25,6 +25,26 @@ which the tests use. pyvips ships libvips in its binary wheel, so no system pack
 Units are inches unless named `_px`. Every error is `422 {"detail": "<message>"}`, including
 request validation errors and missing keys (`file not found: <key>`).
 
+### Auth, limits and config (T-9-5)
+
+| Env | Default | What |
+| --- | --- | --- |
+| `IMAGING_SHARED_SECRET` | `invai-imaging-dev-secret` | Every path but `/health` needs `X-Imaging-Secret: <secret>` (constant-time compare), else `401`. A comma-separated list accepts each entry (rotation). The backend sends its own `IMAGING_SHARED_SECRET`. |
+| `IMAGING_ENV` | `development` (`production` in the Docker image) | `production` refuses to start on the dev secret or one under 32 chars. |
+| `IMAGING_DEV_ENDPOINTS` | `false` | `/labels/mock` and `/sample-art` answer `404` unless `true`. Local dev (`.env.example`) sets it; the backend's mock carrier and the seed need it. |
+| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose` and `/render/personalization` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
+| `IMAGING_RETRY_AFTER_S` | `5` | The `Retry-After` value. |
+| `IMAGING_MAX_DECODE_PIXELS` | `570000000` | Pixel cap checked from the header before decoding (raster, SVG size, and PDF page size × DPI). |
+
+- Inputs are PNG, JPEG, WebP, TIFF, SVG or PDF by magic bytes, loaded with that format's loader
+  only (libvips' untrusted loaders are blocked). A key with an extension (`…/<uuid>.png`) must
+  match its bytes. QA reports a mismatch as an `unreadable` issue; other endpoints answer `422`.
+- Bounds: sheet width ≤ 60 in, length ≤ 240 in, DPI 36–1200, at most 10,000 placements per
+  compose or copies per nest, keys ≤ 512 chars.
+- Every response has `X-Render-Ms`; `/compose` and `/render/personalization` also return
+  `render_ms`. The Docker image has a `HEALTHCHECK` on `/health` and waits up to 30 s for running
+  requests on shutdown.
+
 | Endpoint | Request | Response |
 | --- | --- | --- |
 | `GET /health` | | `{ok, vips_version}` |

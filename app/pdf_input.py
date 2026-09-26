@@ -18,6 +18,7 @@ from pathlib import Path
 import pypdfium2 as pdfium
 import pyvips
 
+from app.limits import pdf_page_budget_error
 from app.vips import ImageError
 
 PT_PER_IN = 72.0
@@ -34,6 +35,9 @@ def rasterize_pdf(path: Path, dpi: float) -> pyvips.Image:
             raise ImageError(f"pdf art must be single-page, got {len(doc)} pages")
 
         page = doc[0]
+        # pdfium bypasses the libvips decode cap, so check page size x DPI before rendering.
+        if err := pdf_page_budget_error(*page.get_size(), dpi):
+            raise ImageError(err)
         scale = dpi / PT_PER_IN
         bitmap = page.render(scale=scale, draw_annots=False, fill_color=(255, 255, 255, 0))
         try:

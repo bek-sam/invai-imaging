@@ -1,21 +1,24 @@
 """invai-imaging HTTP API (v1-plan.md section 5.1). Inputs and outputs are storage keys."""
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
 import pyvips
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import compose, fonts, labels, mockups, nesting, qa, render, sample_art
-from app.config import settings
+from app.config import production_config_error, settings
+from app.guard import GuardMiddleware, limiter
+from app.limits import declared_type_error
 from app.pdf import PDF_MAX_LENGTH_IN
-from app.storage import NotFoundError, S3Storage, get_storage
+from app.storage import NotFoundError, S3Storage, Storage, get_storage
 from app.vips import ImageError, workdir
 
 log = logging.getLogger("invai.imaging")
@@ -23,6 +26,8 @@ log = logging.getLogger("invai.imaging")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if err := production_config_error(settings):
+        raise RuntimeError(f"Refusing to start: {err}")
     storage = get_storage()
     if isinstance(storage, S3Storage) and settings.s3_create_bucket:
         try:
@@ -30,9 +35,21 @@ async def lifespan(_: FastAPI):
         except (BotoCoreError, ClientError) as e:  # keep serving; requests report the error
             log.warning("could not ensure bucket %s: %s", settings.s3_bucket, e)
     yield
+    # uvicorn has stopped accepting and waited (--timeout-graceful-shutdown) for requests.
+    if limiter.in_flight:
+        log.warning("shutting down with %d heavy jobs still running", limiter.in_flight)
 
 
 app = FastAPI(title="invai-imaging", lifespan=lifespan)
+# Service auth + heavy-job limit + X-Render-Ms, before any body is read (app/guard.py).
+app.add_middleware(GuardMiddleware)
+
+# Storage keys: same shape as the backend's isSafeKey (512 chars max).
+Key = Field(min_length=1, max_length=512)
+
+# Most placements one compose (or copies one nest) may carry: a 22 x 240in sheet of 1in
+# designs is about 2,500, and 4,000 pieces nest in 0.3 s (audit A-INF).
+MAX_PLACEMENTS = 10_000
 
 
 @app.exception_handler(RequestValidationError)
@@ -59,9 +76,31 @@ async def nest_error(_: Request, exc: nesting.NestError):
     return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
+class _CheckedStorage:
+    """Storage whose downloads must match the type their key declares (`<uuid>.png` must be a
+    PNG by magic bytes), so a renamed file is refused before any decoder sees it."""
+
+    def __init__(self, inner: Storage) -> None:
+        self._inner = inner
+
+    def download(self, key: str, dest: Path) -> None:
+        self._inner.download(key, dest)
+        if err := declared_type_error(key, dest):
+            raise ImageError(err)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def _download(key: str, dest: Path) -> Path:
-    get_storage().download(key, dest)
+    _CheckedStorage(get_storage()).download(key, dest)
     return dest
+
+
+def _dev_only() -> None:
+    """Mock/test endpoints answer 404 unless IMAGING_DEV_ENDPOINTS is set."""
+    if not settings.imaging_dev_endpoints:
+        raise HTTPException(status_code=404, detail="Not Found")
 
 
 # --- health -------------------------------------------------------------------------------
@@ -76,21 +115,25 @@ def health() -> dict:
 
 
 class QACheckRequest(BaseModel):
-    file_key: str
-    target_width_in: float | None = Field(None, gt=0)
-    target_height_in: float | None = Field(None, gt=0)
+    file_key: str = Key
+    target_width_in: float | None = Field(None, gt=0, le=240)
+    target_height_in: float | None = Field(None, gt=0, le=240)
 
 
 @app.post("/qa/check")
 def qa_check(req: QACheckRequest) -> dict:
     with workdir() as tmp:
-        path = _download(req.file_key, tmp / "input")
+        path = tmp / "input"
+        get_storage().download(req.file_key, path)
+        # A file that doesn't match its key's type is reported like any unreadable file.
+        if err := declared_type_error(req.file_key, path):
+            return qa.QAResult(issues=[qa.Issue("unreadable", "error", err)]).to_dict()
         return qa.check(path, req.target_width_in, req.target_height_in).to_dict()
 
 
 class CleanAlphaRequest(BaseModel):
-    file_key: str
-    out_key: str
+    file_key: str = Key
+    out_key: str = Key
     threshold: int = Field(128, ge=1, le=255)
 
 
@@ -108,17 +151,17 @@ def qa_clean_alpha(req: CleanAlphaRequest) -> dict:
 
 
 class SlotModel(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=40)
     kind: Literal["text", "photo"] = "text"
     x_in: float = Field(ge=0)
     y_in: float = Field(ge=0)
     w_in: float = Field(gt=0)
     h_in: float = Field(gt=0)
     font_family: str = "Inter"
-    font_size_pt: float = Field(36, gt=0)
-    min_font_size_pt: float | None = Field(None, gt=0)
-    max_lines: int | None = Field(None, gt=0)
-    stroke_width_pt: float = Field(0, ge=0)
+    font_size_pt: float = Field(36, gt=0, le=1000)
+    min_font_size_pt: float | None = Field(None, gt=0, le=1000)
+    max_lines: int | None = Field(None, gt=0, le=50)
+    stroke_width_pt: float = Field(0, ge=0, le=100)
     stroke_color: str | None = None
     fit: Literal["fit", "fill"] = "fit"
     color: str = "#000000"
@@ -139,8 +182,8 @@ class SlotModel(BaseModel):
 class TemplateModel(BaseModel):
     width_in: float = Field(gt=0, le=60)
     height_in: float = Field(gt=0, le=60)
-    background_key: str | None = None
-    slots: list[SlotModel]
+    background_key: str | None = Field(None, min_length=1, max_length=512)
+    slots: list[SlotModel] = Field(max_length=50)
 
     @model_validator(mode="after")
     def _check_geometry(self) -> "TemplateModel":
@@ -159,15 +202,24 @@ class TemplateModel(BaseModel):
 
 class PersonalizationRequest(BaseModel):
     template: TemplateModel
-    values: dict[str, str] = {}
-    out_key: str
+    values: dict[str, str] = Field(default_factory=dict, max_length=50)
+    out_key: str = Key
     dpi: int = Field(300, ge=36, le=1200)
+
+    @field_validator("values")
+    @classmethod
+    def _bounded_values(cls, v: dict[str, str]) -> dict[str, str]:
+        for name, value in v.items():
+            if len(name) > 40 or len(value) > 1000:
+                raise ValueError(f"value for {name[:40]!r} is too long (max 1000 characters)")
+        return v
 
 
 @app.post("/render/personalization")
 def render_personalization(req: PersonalizationRequest) -> dict:
     t = req.template
     slots = [render.Slot(**s.model_dump()) for s in t.slots]
+    started = time.perf_counter()
     with workdir() as tmp:
         bg = _download(t.background_key, tmp / "background") if t.background_key else None
         # Photo slots carry a storage key in `values` (like `background_key`), not literal text.
@@ -186,6 +238,7 @@ def render_personalization(req: PersonalizationRequest) -> dict:
         "width_px": res.width_px,
         "height_px": res.height_px,
         "flags": [f.__dict__ for f in res.flags],
+        "render_ms": round((time.perf_counter() - started) * 1000),
     }
 
 
@@ -193,20 +246,27 @@ def render_personalization(req: PersonalizationRequest) -> dict:
 
 
 class NestItemModel(BaseModel):
-    id: str
-    width_in: float = Field(gt=0)
-    height_in: float = Field(gt=0)
+    id: str = Field(min_length=1, max_length=100)
+    width_in: float = Field(gt=0, le=240)
+    height_in: float = Field(gt=0, le=240)
     quantity: int = Field(1, ge=1, le=10_000)
 
 
 class NestRequest(BaseModel):
-    items: list[NestItemModel]
-    sheet_width_in: float = Field(22.0, gt=0)
-    spacing_in: float = Field(0.25, ge=0)
-    margin_in: float = Field(0.25, ge=0)
+    items: list[NestItemModel] = Field(max_length=5_000)
+    sheet_width_in: float = Field(22.0, gt=0, le=60)
+    spacing_in: float = Field(0.25, ge=0, le=6)
+    margin_in: float = Field(0.25, ge=0, le=6)
     max_length_in: float = Field(240.0, gt=0, le=240)
     allow_rotation: bool = True
-    label_height_in: float = Field(0.42, ge=0)
+    label_height_in: float = Field(0.42, ge=0, le=6)
+
+    @model_validator(mode="after")
+    def _bounded_copies(self) -> "NestRequest":
+        copies = sum(i.quantity for i in self.items)
+        if copies > MAX_PLACEMENTS:
+            raise ValueError(f"{copies} copies to nest; at most {MAX_PLACEMENTS} per request")
+        return self
 
 
 @app.post("/nest")
@@ -237,36 +297,36 @@ def nest(req: NestRequest) -> dict:
 
 
 class LabelModel(BaseModel):
-    order_no: str = ""
-    item_no: str = ""
-    size: str = ""
-    color: str = ""
-    design: str = ""
+    order_no: str = Field("", max_length=100)
+    item_no: str = Field("", max_length=100)
+    size: str = Field("", max_length=100)
+    color: str = Field("", max_length=100)
+    design: str = Field("", max_length=200)
     reprint: bool = False
 
 
 class ComposePlacementModel(BaseModel):
-    transfer_id: str
-    file_key: str
-    x_in: float
-    y_in: float
-    width_in: float = Field(gt=0)
-    height_in: float = Field(gt=0)
+    transfer_id: str = Field(min_length=1, max_length=100)
+    file_key: str = Key
+    x_in: float = Field(ge=0, le=240)
+    y_in: float = Field(ge=0, le=240)
+    width_in: float = Field(gt=0, le=240)
+    height_in: float = Field(gt=0, le=240)
     rotated: bool = False
     label: LabelModel | None = None
 
 
 class ComposeRequest(BaseModel):
-    width_in: float = Field(gt=0)
-    length_in: float = Field(gt=0)
+    width_in: float = Field(gt=0, le=60)
+    length_in: float = Field(gt=0, le=240)
     dpi: int = Field(300, ge=36, le=1200)
-    placements: list[ComposePlacementModel]
-    label_height_in: float = Field(0.42, ge=0)
-    out_key: str
-    pdf_key: str | None = None
-    preview_key: str
+    placements: list[ComposePlacementModel] = Field(max_length=MAX_PLACEMENTS)
+    label_height_in: float = Field(0.42, ge=0, le=6)
+    out_key: str = Key
+    pdf_key: str | None = Field(None, min_length=1, max_length=512)
+    preview_key: str = Key
     preview_width_px: int = Field(1200, ge=16, le=8000)
-    label_gap_in: float = Field(compose.DEFAULT_LABEL_GAP_IN, ge=0)
+    label_gap_in: float = Field(compose.DEFAULT_LABEL_GAP_IN, ge=0, le=1)
     filename_hint: str | None = Field(None, max_length=150)
 
     @model_validator(mode="after")
@@ -284,7 +344,7 @@ class ComposeRequest(BaseModel):
 @app.post("/compose")
 def compose_sheet(req: ComposeRequest) -> dict:
     res = compose.compose_sheet(
-        get_storage(),
+        _CheckedStorage(get_storage()),
         width_in=req.width_in,
         length_in=req.length_in,
         dpi=req.dpi,
@@ -315,6 +375,7 @@ def compose_sheet(req: ComposeRequest) -> dict:
         "width_px": res.width_px,
         "height_px": res.height_px,
         "bytes": res.bytes,
+        "render_ms": round(res.seconds * 1000),
     }
     if req.pdf_key:
         out["pdf_key"] = req.pdf_key
@@ -325,10 +386,10 @@ def compose_sheet(req: ComposeRequest) -> dict:
 
 
 class MockupRequest(BaseModel):
-    design_key: str
+    design_key: str = Key
     blank_color_hex: str = Field(pattern=r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
     placement: Literal["front", "back"] = "front"
-    out_key: str
+    out_key: str = Key
     size_px: int = Field(1200, ge=128, le=4000)
 
 
@@ -364,7 +425,7 @@ class MockLabelRequest(BaseModel):
     out_key: str
 
 
-@app.post("/labels/mock")
+@app.post("/labels/mock", dependencies=[Depends(_dev_only)])
 def label_mock(req: MockLabelRequest) -> dict:
     pdf = labels.render_label(
         req.shipment_id,
@@ -387,7 +448,7 @@ class QrLabelItemModel(BaseModel):
 
 class QrLabelsRequest(BaseModel):
     labels: list[QrLabelItemModel] = Field(min_length=1, max_length=200)
-    out_key: str
+    out_key: str = Key
 
 
 @app.post("/labels/qr")
@@ -412,7 +473,7 @@ class SampleArtRequest(BaseModel):
     color_hex: str = Field("#111111", pattern=r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
-@app.post("/sample-art")
+@app.post("/sample-art", dependencies=[Depends(_dev_only)])
 def sample_art_endpoint(req: SampleArtRequest) -> dict:
     w, h = round(req.width_in * req.dpi), round(req.height_in * req.dpi)
     im = sample_art.render_sample_art(req.text, w, h, req.color_hex)

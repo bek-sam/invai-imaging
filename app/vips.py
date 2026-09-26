@@ -8,8 +8,22 @@ import pyvips
 from PIL import Image
 
 from app.config import settings
+from app.limits import pixel_budget_error, sniff_format, unsupported_message
 
 MM_PER_IN = 25.4
+
+# Raster loaders by sniffed format (T-9-5): never let libvips pick a loader from the content,
+# and block the loaders libvips marks untrusted (magick, matload, ...) as a second line.
+_RASTER_LOADERS = {
+    "png": pyvips.Image.pngload,
+    "jpeg": pyvips.Image.jpegload,
+    "webp": pyvips.Image.webpload,
+    "tiff": pyvips.Image.tiffload,
+}
+pyvips.block_untrusted_set(True)
+# librsvg is marked untrusted, but SVG art is a feature (T-9-1): it's only ever reached through
+# `load()` after sniffing, and its size is capped before rendering like any other decode.
+pyvips.operation_block_set("VipsForeignLoadSvg", False)
 
 
 class ImageError(Exception):
@@ -20,18 +34,6 @@ class ImageError(Exception):
 def workdir():
     with tempfile.TemporaryDirectory(prefix="invai-", dir=settings.tmp_dir) as d:
         yield Path(d)
-
-
-def _sniff(path: Path) -> str | None:
-    """Detect PDF/SVG by content, not extension: callers download to extensionless temp paths."""
-    with open(path, "rb") as f:
-        head = f.read(256)
-    if head.startswith(b"%PDF-"):
-        return "pdf"
-    stripped = head.lstrip(b"\xef\xbb\xbf \t\r\n")
-    if stripped.startswith((b"<?xml", b"<svg")):
-        return "svg"
-    return None
 
 
 def load(path: Path, access: str = "random", target_dpi: float | None = None) -> pyvips.Image:
@@ -47,7 +49,9 @@ def load(path: Path, access: str = "random", target_dpi: float | None = None) ->
 
     PDF has no libvips loader at all (see `app/pdf_input.py`), so it's routed there instead.
     """
-    kind = _sniff(path)
+    kind = sniff_format(path)
+    if kind is None:
+        raise ImageError(unsupported_message())
     try:
         if kind == "pdf":
             if target_dpi is None:
@@ -55,12 +59,15 @@ def load(path: Path, access: str = "random", target_dpi: float | None = None) ->
             from app.pdf_input import rasterize_pdf
 
             img = rasterize_pdf(path, target_dpi)
-        elif kind == "svg" and target_dpi is not None:
-            img = pyvips.Image.svgload(str(path), scale=target_dpi / 72.0, access=access)
+        elif kind == "svg":
+            scale = target_dpi / 72.0 if target_dpi is not None else 1.0
+            img = pyvips.Image.svgload(str(path), scale=scale, access=access)
         else:
-            img = pyvips.Image.new_from_file(str(path), access=access)
-        # Force the header parse so unreadable files fail here, not mid-pipeline.
-        _ = img.width
+            img = _RASTER_LOADERS[kind](str(path), access=access)
+        # The header parse (lazy, no pixels yet) makes unreadable files fail here, and the pixel
+        # cap stops a decompression bomb before a single pixel is decoded.
+        if err := pixel_budget_error(img.width, img.height):
+            raise ImageError(err)
         return img
     except pyvips.Error as e:
         raise ImageError(f"unreadable image: {str(e).splitlines()[0]}") from e

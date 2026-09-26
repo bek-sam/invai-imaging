@@ -15,7 +15,8 @@ ROOT = Path(settings.local_storage_dir)
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(app) as c:
+    # Every call but /health needs the shared secret (T-9-5); the dev default is used here.
+    with TestClient(app, headers={"X-Imaging-Secret": settings.shared_secrets()[0]}) as c:
         yield c
 
 
