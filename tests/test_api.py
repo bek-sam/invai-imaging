@@ -244,3 +244,37 @@ def test_sample_art_every_style_fits_narrow_sleeve_art(client):
             },
         )
         assert r.status_code == 200, (text, r.text)
+
+
+def test_compose_rejects_pdf_output_over_200in(client):
+    # B-80: PDF pages can't rely on /UserUnit, so /compose caps PDF output at 200in with a clear
+    # 422 -- checked here before any compositing work, not just inside app/pdf.py.
+    r = client.post(
+        "/compose",
+        json={
+            "width_in": 22,
+            "length_in": 240,
+            "placements": [],
+            "out_key": "t/long.png",
+            "pdf_key": "t/long.pdf",
+            "preview_key": "t/long-preview.png",
+        },
+    )
+    assert r.status_code == 422
+    assert "200in" in r.json()["detail"]
+    assert not (ROOT / "t/long.pdf").exists()
+
+    # PNG-only output at the same length is unaffected by the PDF cap (kept tiny: width/dpi don't
+    # matter to this check, only length_in and pdf_key do).
+    r = client.post(
+        "/compose",
+        json={
+            "width_in": 1,
+            "length_in": 240,
+            "dpi": 36,
+            "placements": [],
+            "out_key": "t/long-ok.png",
+            "preview_key": "t/long-ok-preview.png",
+        },
+    )
+    assert r.status_code == 200, r.text

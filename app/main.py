@@ -10,10 +10,11 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import compose, labels, mockups, nesting, qa, render, sample_art
 from app.config import settings
+from app.pdf import PDF_MAX_LENGTH_IN
 from app.storage import NotFoundError, S3Storage, get_storage
 from app.vips import ImageError, workdir
 
@@ -169,7 +170,7 @@ class NestRequest(BaseModel):
     sheet_width_in: float = Field(22.0, gt=0)
     spacing_in: float = Field(0.25, ge=0)
     margin_in: float = Field(0.25, ge=0)
-    max_length_in: float = Field(240.0, gt=0)
+    max_length_in: float = Field(240.0, gt=0, le=240)
     allow_rotation: bool = True
     label_height_in: float = Field(0.35, ge=0)
 
@@ -231,6 +232,17 @@ class ComposeRequest(BaseModel):
     pdf_key: str | None = None
     preview_key: str
     preview_width_px: int = Field(1200, ge=16, le=8000)
+
+    @model_validator(mode="after")
+    def _pdf_length_cap(self) -> "ComposeRequest":
+        # B-80: PDF pages can't rely on /UserUnit (app/pdf.py), so cap PDF output at 200in here
+        # too — a clear 422 before compositing, rather than after, if a caller bypasses the
+        # SheetSpec cap enforced at spec save.
+        if self.pdf_key is not None and self.length_in > PDF_MAX_LENGTH_IN:
+            raise ValueError(
+                f"PDF sheets are capped at {PDF_MAX_LENGTH_IN}in; use PNG for longer runs."
+            )
+        return self
 
 
 @app.post("/compose")

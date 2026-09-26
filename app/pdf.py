@@ -3,8 +3,15 @@
 libvips in the binary wheel has no pdfsave, and img2pdf/reportlab would decode the whole sheet into
 memory (a 22 x 240in sheet is 1.9 GB of RGBA). So we write the PDF ourselves: the image is read in
 strips, RGB and alpha are deflated into two temp streams (image XObject + SMask), then the file is
-assembled. Pages longer than 200in (14,400pt, the classic Acrobat limit) use /UserUnit so the
-physical size stays correct.
+assembled.
+
+B-80 decision (cap, not split): PDF pages beyond 200in (14,400pt, the classic Acrobat limit) used
+to fall back to /UserUnit to keep the physical size correct, but several RIPs/viewers (including
+some CADlink versions) don't honor /UserUnit, so a long sheet printed at the wrong size. Rather
+than special-case that branch, PDF output is capped at 200in: `SheetSpec` rejects a PDF vendor
+spec longer than that at save time (`invai-contracts/src/schemas/vendors.ts`, enforced again in
+`invai-backend`'s vendor service), and this function raises defensively in case anything bypasses
+that check. PNG has no page-size concept, so it keeps its own (higher) ceiling.
 """
 
 import shutil
@@ -13,13 +20,18 @@ from pathlib import Path
 
 import pyvips
 
-from app.vips import to_srgba
+from app.vips import ImageError, to_srgba
 
 STRIP_ROWS = 256
-MAX_PAGE_PT = 14_400
+PDF_MAX_LENGTH_IN = 200
+MAX_PAGE_PT = PDF_MAX_LENGTH_IN * 72
 
 
 def write_image_pdf(src: Path, dest: Path, width_in: float, height_in: float) -> None:
+    if max(width_in, height_in) > PDF_MAX_LENGTH_IN:
+        raise ImageError(
+            f"PDF sheets are capped at {PDF_MAX_LENGTH_IN}in; use PNG for longer runs."
+        )
     img = to_srgba(pyvips.Image.new_from_file(str(src), access="sequential"))
     w, h = img.width, img.height
     rgb_path, alpha_path = dest.with_suffix(".rgb.z"), dest.with_suffix(".a.z")
@@ -40,11 +52,9 @@ def write_image_pdf(src: Path, dest: Path, width_in: float, height_in: float) ->
         rgb_f.write(rgb_z.flush())
         a_f.write(a_z.flush())
 
+    # width_in/height_in are already <= PDF_MAX_LENGTH_IN (checked above), so page_w/page_h are
+    # always <= MAX_PAGE_PT and no /UserUnit scaling is needed.
     page_w, page_h = width_in * 72, height_in * 72
-    unit = 1.0
-    if max(page_w, page_h) > MAX_PAGE_PT:
-        unit = max(page_w, page_h) / MAX_PAGE_PT
-        page_w, page_h = page_w / unit, page_h / unit
 
     offsets: list[int] = []
     with open(dest, "wb") as out:
@@ -62,13 +72,12 @@ def write_image_pdf(src: Path, dest: Path, width_in: float, height_in: float) ->
 
         out.write(b"%PDF-1.6\n%\xe2\xe3\xcf\xd3\n")
         content = f"q {page_w:.4f} 0 0 {page_h:.4f} 0 0 cm /Im0 Do Q".encode()
-        user_unit = f" /UserUnit {unit:.6f}" if unit != 1.0 else ""
         obj(b"<< /Type /Catalog /Pages 2 0 R >>")
         obj(b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
         obj(
             (
                 f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.4f} {page_h:.4f}]"
-                f"{user_unit} /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
+                f" /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>"
             ).encode()
         )
         obj(f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream")
