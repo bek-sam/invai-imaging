@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 import pyvips
 from fastapi.testclient import TestClient
+from PIL import Image as PILImage
 from pypdf import PdfReader
 
 from app.config import settings
@@ -202,6 +203,94 @@ def test_personalization_endpoint(client):
     body = r.json()
     assert (body["width_px"], body["height_px"]) == (1800, 900)
     assert body["flags"] == [{"slot": "year", "code": "empty", "message": "no value given"}]
+
+
+def test_personalization_rejects_unknown_font(client):
+    r = client.post(
+        "/render/personalization",
+        json={
+            "template": {
+                "width_in": 4,
+                "height_in": 2,
+                "slots": [
+                    {
+                        "name": "name",
+                        "x_in": 0,
+                        "y_in": 0,
+                        "w_in": 4,
+                        "h_in": 2,
+                        "font_family": "Comic Sans",
+                    }
+                ],
+            },
+            "values": {"name": "Olivia"},
+            "out_key": "t/bad-font.png",
+        },
+    )
+    assert r.status_code == 422
+    assert "unknown font family" in r.json()["detail"]
+
+
+def test_personalization_rejects_duplicate_slot_names(client):
+    slot = {"name": "name", "x_in": 0, "y_in": 0, "w_in": 2, "h_in": 1}
+    r = client.post(
+        "/render/personalization",
+        json={
+            "template": {"width_in": 4, "height_in": 2, "slots": [slot, dict(slot)]},
+            "values": {},
+            "out_key": "t/dup.png",
+        },
+    )
+    assert r.status_code == 422
+    assert "duplicate slot name" in r.json()["detail"]
+
+
+def test_personalization_rejects_slot_outside_template_bounds(client):
+    slot = {"name": "name", "x_in": 3, "y_in": 0, "w_in": 3, "h_in": 1}
+    r = client.post(
+        "/render/personalization",
+        json={
+            "template": {"width_in": 4, "height_in": 2, "slots": [slot]},
+            "values": {},
+            "out_key": "t/outside.png",
+        },
+    )
+    assert r.status_code == 422
+    assert "extends outside" in r.json()["detail"]
+
+
+def test_personalization_photo_slot_end_to_end(client):
+    photo_path = ROOT / "t/buyer-photo.jpg"
+    photo_path.parent.mkdir(parents=True, exist_ok=True)
+    PILImage.new("RGB", (1200, 1200), (10, 20, 30)).save(photo_path)
+
+    r = client.post(
+        "/render/personalization",
+        json={
+            "template": {
+                "width_in": 3,
+                "height_in": 3,
+                "slots": [
+                    {
+                        "name": "photo",
+                        "kind": "photo",
+                        "x_in": 0,
+                        "y_in": 0,
+                        "w_in": 3,
+                        "h_in": 3,
+                        "fit": "fill",
+                    }
+                ],
+            },
+            "values": {"photo": "t/buyer-photo.jpg"},
+            "out_key": "t/photo-slot.png",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["flags"] == []
+    img = pyvips.Image.new_from_file(str(ROOT / "t/photo-slot.png"))
+    assert (img.width, img.height) == (900, 900)
+    assert img.crop(0, 0, 10, 10)[3].min() == 255  # filled, fully opaque
 
 
 def test_errors_are_422_with_detail(client):

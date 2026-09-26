@@ -10,9 +10,9 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app import compose, labels, mockups, nesting, qa, render, sample_art
+from app import compose, fonts, labels, mockups, nesting, qa, render, sample_art
 from app.config import settings
 from app.pdf import PDF_MAX_LENGTH_IN
 from app.storage import NotFoundError, S3Storage, get_storage
@@ -109,17 +109,31 @@ def qa_clean_alpha(req: CleanAlphaRequest) -> dict:
 
 class SlotModel(BaseModel):
     name: str
-    kind: Literal["text"] = "text"
+    kind: Literal["text", "photo"] = "text"
     x_in: float = Field(ge=0)
     y_in: float = Field(ge=0)
     w_in: float = Field(gt=0)
     h_in: float = Field(gt=0)
     font_family: str = "Inter"
     font_size_pt: float = Field(36, gt=0)
+    min_font_size_pt: float | None = Field(None, gt=0)
+    max_lines: int | None = Field(None, gt=0)
+    stroke_width_pt: float = Field(0, ge=0)
+    stroke_color: str | None = None
+    fit: Literal["fit", "fill"] = "fit"
     color: str = "#000000"
     align: Literal["left", "center", "right"] = "center"
     max_chars: int | None = Field(None, gt=0)
     uppercase: bool = False
+
+    @field_validator("font_family")
+    @classmethod
+    def _known_font(cls, v: str) -> str:
+        # The real B-81 bug: fonts.normalize_family() used to silently fall back to Inter on an
+        # unknown name instead of rejecting it. Reject here, before it ever reaches render.py.
+        if not fonts.known_family(v):
+            raise ValueError(f"unknown font family: {v!r}")
+        return v
 
 
 class TemplateModel(BaseModel):
@@ -127,6 +141,20 @@ class TemplateModel(BaseModel):
     height_in: float = Field(gt=0, le=60)
     background_key: str | None = None
     slots: list[SlotModel]
+
+    @model_validator(mode="after")
+    def _check_geometry(self) -> "TemplateModel":
+        names: set[str] = set()
+        for s in self.slots:
+            if s.name in names:
+                raise ValueError(f"duplicate slot name: {s.name!r}")
+            names.add(s.name)
+            if s.x_in + s.w_in > self.width_in + 1e-6 or s.y_in + s.h_in > self.height_in + 1e-6:
+                raise ValueError(
+                    f"slot {s.name!r} extends outside the {self.width_in}x{self.height_in} "
+                    "in template"
+                )
+        return self
 
 
 class PersonalizationRequest(BaseModel):
@@ -142,9 +170,15 @@ def render_personalization(req: PersonalizationRequest) -> dict:
     slots = [render.Slot(**s.model_dump()) for s in t.slots]
     with workdir() as tmp:
         bg = _download(t.background_key, tmp / "background") if t.background_key else None
+        # Photo slots carry a storage key in `values` (like `background_key`), not literal text.
+        photos = {
+            s.name: _download(req.values[s.name], tmp / f"photo_{s.name}")
+            for s in t.slots
+            if s.kind == "photo" and req.values.get(s.name)
+        }
         out = tmp / "out.png"
         res = render.render_personalization(
-            t.width_in, t.height_in, slots, req.values, req.dpi, out, bg
+            t.width_in, t.height_in, slots, req.values, req.dpi, out, bg, photos
         )
         get_storage().upload(out, req.out_key)
     return {
