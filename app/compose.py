@@ -10,8 +10,11 @@ Under each design (inside the label strip that nesting reserved) we print a QR c
 transfer_id and "order_no · item_no · size · color · design", plus REPRINT when flagged. A thin
 dashed cut guide marks `label_gap_in` (the clear film between the design and its label). A
 dedicated top-edge header band, `header_height_in` tall (nesting starts placements below it,
-not just below margin_in), carries a second QR (plus text) for `filename_hint` when given, so a
-RIP or a human can look the job up by name or by scanning the code (B-79).
+not just below margin_in), carries a second QR for `sheet_id` alone -- short and fixed-length,
+so it always fits regardless of order count -- plus human-readable text (`filename_hint` when
+given, truncated with an ellipsis if it's too long to draw in full; the untruncated text still
+travels in the ContentDisposition filename), so a RIP or a human can look the job up by name or
+by scanning the code (B-79).
 
 Every transfer-label QR is drawn from a raster of at least `QR_MIN_DPI`, whatever the sheet's own
 `dpi` is, and every module is held to at least `MIN_MODULE_MM` -- when the label strip is too
@@ -135,18 +138,6 @@ def qr_image(data: str, avail_px: int, dpi: float) -> Image.Image:
     return _qr_bitmap(matrix, avail_px, dpi)
 
 
-def header_qr_image(data: str, avail_px: int, dpi: float) -> Image.Image | None:
-    """Same construction as `qr_image`, but returns None instead of raising: a header that can't
-    fit a legible QR is dropped, it never fails the whole compose (unlike a transfer label)."""
-    matrix = _qr_matrix(data)
-    if avail_px <= 0:
-        return None
-    avail_in = avail_px / dpi
-    if avail_in < len(matrix) * MIN_MODULE_MM / MM_PER_IN:
-        return None
-    return _qr_bitmap(matrix, avail_px, dpi)
-
-
 def render_cut_guide(width_px: int, thickness_px: int) -> Image.Image:
     """A thin dashed line marking `label_gap_in`, the clear film between a design and its label."""
     im = Image.new("RGBA", (max(1, width_px), max(1, thickness_px)), (0, 0, 0, 0))
@@ -192,17 +183,22 @@ def render_label(transfer_id: str, label: Label | None, width_px: int, height_px
     return im
 
 
-def render_header(sheet_label: str, width_px: int, height_px: int, dpi: float) -> Image.Image:
-    """Sheet header strip (AC2): a QR encoding `sheet_label` plus the same text, so CADlink (or
-    a human) can look the job up by scanning the code or by its name -- both carry the sheet id.
-    Dropped silently (returns a blank strip) if the header band is too short for a legible QR.
+def render_header(
+    qr_payload: str, display_text: str, width_px: int, height_px: int, dpi: float
+) -> Image.Image:
+    """Sheet header strip (AC2, revised per the gate's finding A): the QR encodes `qr_payload`
+    alone -- the sheet id, short and fixed-length, never the full label with every order number
+    on the sheet -- so it always fits the header band, whatever the order count. `display_text`
+    (the fuller label, e.g. sheet name + order numbers) is shown as human-readable text next to
+    it, truncated with an ellipsis if it doesn't fit -- the full text still travels in the
+    ContentDisposition filename either way, so truncating the on-sheet text loses nothing.
+
+    Never drops the QR silently: `qr_image` raises `ImageError` if even `qr_payload` doesn't
+    fit -- compose fails loudly rather than shipping a sheet with no scannable header.
     """
     im = Image.new("RGBA", (width_px, height_px), (0, 0, 0, 0))
     qr_side = min(height_px, width_px)
-    qr = header_qr_image(sheet_label, qr_side, dpi)
-    if qr is None:
-        return im
-    im.paste(qr, (0, 0))
+    im.paste(qr_image(qr_payload, qr_side, dpi), (0, 0))
     avail = width_px - qr_side - max(4, height_px // 8)
     if avail < height_px // 2:
         return im
@@ -211,10 +207,10 @@ def render_header(sheet_label: str, width_px: int, height_px: int, dpi: float) -
     size = int(height_px * 0.6)
     min_size = max(8, height_px // 4)
     f = font("Inter Bold", size)
-    while size > min_size and text_size(f, sheet_label)[0] > avail:
+    while size > min_size and text_size(f, display_text)[0] > avail:
         size -= 1
         f = font("Inter Bold", size)
-    text = sheet_label
+    text = display_text
     if text_size(f, text)[0] > avail:
         while text and text_size(f, text + "…")[0] > avail:
             text = text[:-1]
@@ -253,6 +249,7 @@ def compose_sheet(
     label_gap_in: float = DEFAULT_LABEL_GAP_IN,
     filename_hint: str | None = None,
     header_height_in: float = DEFAULT_HEADER_HEIGHT_IN,
+    sheet_id: str | None = None,
 ) -> ComposeResult:
     started = time.monotonic()
     W, H = round(width_in * dpi), round(length_in * dpi)
@@ -266,14 +263,22 @@ def compose_sheet(
         variants: dict[tuple, tuple[Path, int, int]] = {}
         layers: list[tuple[Path, int, int]] = []
 
-        if filename_hint:
+        # Gate finding A: the QR must encode the (short, fixed-length) sheet id only -- never
+        # the full label, whose order-number list makes it unbounded -- so it always fits the
+        # header band. sheet_id is the real fix; filename_hint alone (today's only caller) is
+        # used as a fallback QR payload too, but no longer silently dropped when it overflows.
+        header_qr_payload = sheet_id if sheet_id is not None else filename_hint
+        header_display_text = filename_hint if filename_hint is not None else sheet_id
+        if header_qr_payload:
             # A dedicated top-edge band (tech lead, 2026-09-26): nesting reserves exactly this
             # much before the first placement, so -- unlike the old "infer it from the topmost
             # placement's y_in" approach -- compose can just trust header_height_in directly.
             header_h = min(round(header_height_in * dpi), H)
             if header_h >= 8:
                 hpath = tmp / "header.png"
-                render_header(filename_hint, W, header_h, dpi).save(hpath, compress_level=1)
+                render_header(header_qr_payload, header_display_text, W, header_h, dpi).save(
+                    hpath, compress_level=1
+                )
                 layers.append((hpath, 0, 0))
 
         for i, p in enumerate(placements):

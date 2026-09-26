@@ -6,6 +6,7 @@ from pypdf import PdfReader
 
 from app.compose import (
     CUT_GUIDE_COLOR,
+    DEFAULT_HEADER_HEIGHT_IN,
     ComposePlacement,
     Label,
     _qr_matrix,
@@ -304,6 +305,84 @@ def test_compose_without_filename_hint_has_no_header(tmp_path):
     sheet = pyvips.Image.new_from_file(str(tmp_path / "store/n/o.png"))
     # the top margin band stays fully transparent -- no header was drawn
     assert sheet.getpoint(10, 10)[3] == 0
+
+
+def _order_numbers(n: int) -> list[str]:
+    return [f"113-23{i:05d}-100{i:04d}" for i in range(n)]
+
+
+@pytest.mark.parametrize("dpi", [150, 300])
+def test_compose_header_on_a_20_order_sheet_decodes(tmp_path, dpi):
+    """Gate finding A: a realistic multi-order sheet's filename_hint (sheet name + every
+    distinct order number on the sheet) is far too long to fit one QR at any header height, but
+    the header must still decode -- because the QR now encodes sheet_id alone, never the full,
+    unbounded label (AC2 fix, tech lead 2026-09-26).
+    """
+    store = LocalStorage(tmp_path / "store" / str(dpi))
+    solid_design(tmp_path / "store" / str(dpi) / "a.png", 600, 900)
+    tid = "11111111-2222-3333-4444-555555555555"
+    sheet_id = "2026-09-25 #25"
+    filename_hint = sheet_id + " " + " ".join(_order_numbers(20))
+    # confirms this is a genuinely too-long-for-one-QR case, not a coincidentally-small example
+    assert qr_min_side_in(filename_hint) > DEFAULT_HEADER_HEIGHT_IN
+    placements = [
+        ComposePlacement(
+            tid,
+            "a.png",
+            0.25,
+            1.0,
+            2.0,
+            3.0,
+            False,
+            Label("DB-1001", "1/1", "M", "Black", "Cactus"),
+        )
+    ]
+    compose_sheet(
+        store,
+        6.0,
+        5.5,
+        dpi,
+        placements,
+        LABEL_HEIGHT_IN,
+        "o.png",
+        None,
+        "p.png",
+        100,
+        label_gap_in=GAP_IN,
+        filename_hint=filename_hint,
+        sheet_id=sheet_id,
+    )
+    pil = Image.open(tmp_path / "store" / str(dpi) / "o.png").convert("RGB")
+    found = {r.text for r in zxingcpp.read_barcodes(pil)}
+    assert sheet_id in found  # the header QR: the short sheet id, not the full order-laden label
+    assert tid in found  # the transfer QR, unaffected
+
+
+def test_compose_header_fails_loudly_without_sheet_id_when_label_too_long(tmp_path):
+    """Without an explicit sheet_id, filename_hint itself is the QR payload (today's only real
+    caller, since main.py doesn't send sheet_id yet) -- gate finding A's whole point is that
+    this must never again drop the header silently: it has to fail loudly instead.
+    """
+    store = LocalStorage(tmp_path / "store")
+    solid_design(tmp_path / "store" / "a.png", 600, 900)
+    tid = "11111111-2222-3333-4444-555555555555"
+    filename_hint = "2026-09-25 #25 " + " ".join(_order_numbers(20))
+    placements = [ComposePlacement(tid, "a.png", 0.25, 1.0, 2.0, 3.0, False, None)]
+    with pytest.raises(ImageError, match="scannable"):
+        compose_sheet(
+            store,
+            6.0,
+            5.5,
+            DPI,
+            placements,
+            LABEL_HEIGHT_IN,
+            "o.png",
+            None,
+            "p.png",
+            100,
+            label_gap_in=GAP_IN,
+            filename_hint=filename_hint,
+        )
 
 
 @pytest.mark.parametrize("dpi", [150, 200, 300])
