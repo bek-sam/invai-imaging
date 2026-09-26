@@ -144,7 +144,9 @@ def render_label(
 
 
 def _qr_reader(data: str, box_size: int = 6) -> ImageReader:
-    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=box_size, border=2)
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=box_size, border=2
+    )
     qr.add_data(data)
     qr.make(fit=True)
     return ImageReader(qr.make_image(fill_color="black", back_color="white").convert("RGB"))
@@ -168,9 +170,7 @@ def render_qr_labels(items: list[QrLabelItem]) -> bytes:
         pad = 0.08 * inch
         if item.size == "2x1":
             qr_side = h - 2 * pad
-            c.drawImage(
-                _qr_reader(item.code), pad, pad, qr_side, qr_side, preserveAspectRatio=True
-            )
+            c.drawImage(_qr_reader(item.code), pad, pad, qr_side, qr_side, preserveAspectRatio=True)
             x = pad + qr_side + pad
             avail = w - x - pad
             if item.caption:
