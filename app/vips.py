@@ -22,9 +22,43 @@ def workdir():
         yield Path(d)
 
 
-def load(path: Path, access: str = "random") -> pyvips.Image:
+def _sniff(path: Path) -> str | None:
+    """Detect PDF/SVG by content, not extension: callers download to extensionless temp paths."""
+    with open(path, "rb") as f:
+        head = f.read(256)
+    if head.startswith(b"%PDF-"):
+        return "pdf"
+    stripped = head.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if stripped.startswith((b"<?xml", b"<svg")):
+        return "svg"
+    return None
+
+
+def load(path: Path, access: str = "random", target_dpi: float | None = None) -> pyvips.Image:
+    """Load an image. `target_dpi` is additive and optional: pass it to rasterize vector input
+    (SVG, PDF) at that DPI instead of at their default/native size; omitting it keeps every
+    existing caller's behaviour unchanged.
+
+    SVG uses `scale=target_dpi/72`, not `dpi=target_dpi`: for an SVG with absolute physical
+    units (e.g. `width="10in"`), passing `dpi=` to `svgload` double-applies the DPI (checked
+    live: a 10in-wide SVG at `dpi=300` comes out 12,500px wide, not 3,000 — librsvg applies the
+    factor once converting the physical size to user units, then again as an overall render
+    scale). `scale=` only does the second one, which is the one we want.
+
+    PDF has no libvips loader at all (see `app/pdf_input.py`), so it's routed there instead.
+    """
+    kind = _sniff(path)
     try:
-        img = pyvips.Image.new_from_file(str(path), access=access)
+        if kind == "pdf":
+            if target_dpi is None:
+                raise ImageError("pdf input requires target_dpi")
+            from app.pdf_input import rasterize_pdf
+
+            img = rasterize_pdf(path, target_dpi)
+        elif kind == "svg" and target_dpi is not None:
+            img = pyvips.Image.svgload(str(path), scale=target_dpi / 72.0, access=access)
+        else:
+            img = pyvips.Image.new_from_file(str(path), access=access)
         # Force the header parse so unreadable files fail here, not mid-pipeline.
         _ = img.width
         return img
