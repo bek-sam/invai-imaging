@@ -61,12 +61,21 @@ def soft_alpha_ratio(hist: list[int]) -> float:
 
 
 def check(
-    path: Path, target_width_in: float | None = None, target_height_in: float | None = None
+    path: Path,
+    target_width_in: float | None = None,
+    target_height_in: float | None = None,
+    target_dpi: float | None = None,
 ) -> QAResult:
     res = QAResult()
     size = path.stat().st_size
     try:
-        img = load(path, access="sequential")
+        # PDF has no pixels until rasterized, and `load()` requires a target_dpi for it (T-9-1);
+        # SVG's default (no target_dpi) renders at a 1:1 user-unit scale, not a print-quality
+        # size. Vector art has no "native" resolution the way a raster file does, so QA
+        # rasterizes it at the caller's intended print DPI, falling back to the shop's own
+        # recommended DPI (DPI_WARN) when the caller doesn't say. Raster formats ignore this
+        # (load() only uses target_dpi for pdf/svg), so passing it unconditionally is harmless.
+        img = load(path, access="sequential", target_dpi=target_dpi or DPI_WARN)
         # Decode the pixels once so truncated files are caught here.
         hist = alpha_histogram(img)
     except (ImageError, pyvips.Error) as e:

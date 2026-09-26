@@ -1,8 +1,20 @@
 import pytest
 import pyvips
 from PIL import Image, ImageDraw
+from reportlab.lib.units import inch
+from reportlab.pdfgen import canvas
 
-from app.qa import check, clean_alpha, effective_dpi, soft_alpha_ratio
+from app.qa import DPI_WARN, check, clean_alpha, effective_dpi, soft_alpha_ratio
+
+
+def _pdf_with_margin(path, width_in=2.0, height_in=1.0):
+    """A single-page PDF with a transparent margin, so QA sees real alpha (not fully opaque)."""
+    c = canvas.Canvas(str(path), pagesize=(width_in * inch, height_in * inch))
+    c.setFillColorRGB(0.878, 0.125, 0.125)
+    margin = 0.1 * inch
+    c.rect(margin, margin, width_in * inch - 2 * margin, height_in * inch - 2 * margin, fill=1)
+    c.save()
+    return path
 
 
 def codes(res):
@@ -54,6 +66,29 @@ def test_no_alpha_and_soft_alpha(tmp_path):
     assert pyvips.Image.new_from_file(str(out)).getpoint(5, 5)[3] == 255
     clean_alpha(soft, out, threshold=200)
     assert pyvips.Image.new_from_file(str(out)).getpoint(5, 5)[3] == 0
+
+
+def test_pdf_passes_qa_at_default_dpi(tmp_path):
+    # Gate finding B: qa.check() never passed target_dpi, so `load()` raised
+    # "pdf input requires target_dpi" for every single PDF, 100% of the time. It now falls
+    # back to the shop's own recommended DPI (DPI_WARN) when the caller doesn't specify one.
+    pdf = _pdf_with_margin(tmp_path / "design.pdf", width_in=2.0, height_in=1.0)
+    res = check(pdf, target_width_in=2.0, target_height_in=1.0)
+    assert not [i for i in res.issues if i.severity == "error"]
+    assert (res.width_px, res.height_px) == (round(2.0 * DPI_WARN), round(1.0 * DPI_WARN))
+    assert res.effective_dpi == DPI_WARN
+    assert res.has_alpha is True
+
+
+def test_pdf_qa_honors_explicit_target_dpi(tmp_path):
+    pdf = _pdf_with_margin(tmp_path / "design.pdf", width_in=2.0, height_in=1.0)
+    res = check(pdf, target_width_in=2.0, target_height_in=1.0, target_dpi=150)
+    assert not [i for i in res.issues if i.severity == "error"]
+    assert (res.width_px, res.height_px) == (300, 150)
+    assert res.effective_dpi == 150
+    # 150 DPI at the target size is below the DPI_WARN recommendation but not the DPI_ERROR
+    # floor, so it's a warn, not a failure.
+    assert ("low_dpi", "warn") in codes(res)
 
 
 def test_unreadable_and_tiny(tmp_path):

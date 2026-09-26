@@ -5,6 +5,8 @@ import pyvips
 from fastapi.testclient import TestClient
 from PIL import Image as PILImage
 from pypdf import PdfReader
+from reportlab.lib.units import inch
+from reportlab.pdfgen import canvas
 
 from app.config import settings
 from app.main import app
@@ -47,6 +49,37 @@ def test_full_flow(client):
     assert qa["effective_dpi"] == 300
     assert qa["has_alpha"] is True
     assert not [i for i in qa["issues"] if i["severity"] == "error"]
+
+    # A PDF design upload goes through /qa/check the same way a PNG does (gate finding B: this
+    # used to fail 100% of the time with "pdf input requires target_dpi").
+    (ROOT / "t").mkdir(parents=True, exist_ok=True)
+    pdf_path = ROOT / "t/design.pdf"
+    c = canvas.Canvas(str(pdf_path), pagesize=(2 * inch, 1 * inch))
+    c.setFillColorRGB(0.878, 0.125, 0.125)
+    margin = 0.1 * inch
+    c.rect(margin, margin, 2 * inch - 2 * margin, 1 * inch - 2 * margin, fill=1)
+    c.save()
+    r = client.post(
+        "/qa/check",
+        json={"file_key": "t/design.pdf", "target_width_in": 2, "target_height_in": 1},
+    )
+    assert r.status_code == 200, r.text
+    pdf_qa = r.json()
+    assert not [i for i in pdf_qa["issues"] if i["severity"] == "error"]
+    assert pdf_qa["effective_dpi"] == 300  # QA's own default DPI for vector art (DPI_WARN)
+
+    # An explicit target_dpi rasterizes the PDF at that DPI instead.
+    r = client.post(
+        "/qa/check",
+        json={
+            "file_key": "t/design.pdf",
+            "target_width_in": 2,
+            "target_height_in": 1,
+            "target_dpi": 150,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["width_px"] == 300
 
     r = client.post("/qa/clean-alpha", json={"file_key": "t/art.png", "out_key": "t/clean.png"})
     assert r.json() == {"key": "t/clean.png"}

@@ -118,6 +118,9 @@ class QACheckRequest(BaseModel):
     file_key: str = Key
     target_width_in: float | None = Field(None, gt=0, le=240)
     target_height_in: float | None = Field(None, gt=0, le=240)
+    # PDF/SVG art has no native pixel size; this is the DPI QA rasterizes it at before
+    # measuring. Optional: omit it to get the shop's own recommended DPI (T-9-1 gate fix).
+    target_dpi: float | None = Field(None, ge=36, le=1200)
 
 
 @app.post("/qa/check")
@@ -128,7 +131,7 @@ def qa_check(req: QACheckRequest) -> dict:
         # A file that doesn't match its key's type is reported like any unreadable file.
         if err := declared_type_error(req.file_key, path):
             return qa.QAResult(issues=[qa.Issue("unreadable", "error", err)]).to_dict()
-        return qa.check(path, req.target_width_in, req.target_height_in).to_dict()
+        return qa.check(path, req.target_width_in, req.target_height_in, req.target_dpi).to_dict()
 
 
 class CleanAlphaRequest(BaseModel):
