@@ -232,6 +232,8 @@ class ComposeRequest(BaseModel):
     pdf_key: str | None = None
     preview_key: str
     preview_width_px: int = Field(1200, ge=16, le=8000)
+    label_gap_in: float = Field(compose.DEFAULT_LABEL_GAP_IN, ge=0)
+    filename_hint: str | None = Field(None, max_length=150)
 
     @model_validator(mode="after")
     def _pdf_length_cap(self) -> "ComposeRequest":
@@ -270,6 +272,8 @@ def compose_sheet(req: ComposeRequest) -> dict:
         pdf_key=req.pdf_key,
         preview_key=req.preview_key,
         preview_width_px=req.preview_width_px,
+        label_gap_in=req.label_gap_in,
+        filename_hint=req.filename_hint,
     )
     out = {
         "key": req.out_key,

@@ -36,6 +36,31 @@ def test_s3_storage_roundtrip(tmp_path):
             pass
 
 
+def test_s3_storage_sets_content_disposition_from_filename_hint(tmp_path):
+    # AC2: the download filename (sheet id + order numbers) travels as ContentDisposition, never
+    # the S3 key itself (s3.ts keeps keys opaque/random -- see wave.md's AC2 scope note).
+    with mock_aws():
+        cfg = Settings(
+            storage="s3",
+            s3_endpoint=None,
+            s3_bucket="test-bucket",
+            s3_access_key_id="x",
+            s3_secret_access_key="y",
+        )
+        s = S3Storage(cfg)
+        s.ensure_bucket()
+        src = tmp_path / "a.png"
+        src.write_bytes(b"png-bytes")
+        s.upload(src, "a/b.png", download_filename='SH-1042_DB-1001"; evil\r\n.png')
+        head = s.client.head_object(Bucket="test-bucket", Key="a/b.png")
+        assert head["ContentDisposition"] == 'attachment; filename="SH-1042_DB-1001; evil.png"'
+
+        # no hint -> no ContentDisposition header at all (existing callers are unaffected)
+        s.upload(src, "a/c.png")
+        head2 = s.client.head_object(Bucket="test-bucket", Key="a/c.png")
+        assert "ContentDisposition" not in head2
+
+
 def test_local_storage_rejects_escaping_keys(tmp_path):
     s = LocalStorage(tmp_path)
     try:

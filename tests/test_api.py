@@ -52,12 +52,16 @@ def test_full_flow(client):
         client.post("/qa/check", json={"file_key": "t/clean.png"}).json()["soft_alpha_ratio"] == 0
     )
 
+    # label_height_in must match between /nest and /compose (README); 0.8in clears the AC1
+    # 0.5mm/module QR floor at compose's default label_gap_in (0.125in) -- see test_compose.py.
+    label_height_in = 0.8
     r = client.post(
         "/nest",
         json={
             "items": [{"id": "d1", "width_in": 4, "height_in": 3, "quantity": 3}],
             "sheet_width_in": 10,
             "max_length_in": 30,
+            "label_height_in": label_height_in,
         },
     )
     sheets = r.json()["sheets"]
@@ -85,10 +89,12 @@ def test_full_flow(client):
                 }
                 for p in sheet["placements"]
             ],
+            "label_height_in": label_height_in,
             "out_key": "t/sheet.png",
             "pdf_key": "t/sheet.pdf",
             "preview_key": "t/preview.png",
             "preview_width_px": 200,
+            "filename_hint": "SH-9001_DB-1",
         },
     )
     assert r.status_code == 200, r.text
@@ -97,6 +103,12 @@ def test_full_flow(client):
     assert body["height_px"] == round(sheet["length_in"] * 300)
     assert body["bytes"] == (ROOT / "t/sheet.png").stat().st_size
     assert body["pdf_key"] == "t/sheet.pdf"
+    # AC2's ContentDisposition (download filename) is S3-only; covered at the storage layer in
+    # tests/test_storage.py::test_s3_storage_sets_content_disposition_from_filename_hint. The
+    # header QR itself is covered directly (with enough top clearance to actually fit) in
+    # tests/test_compose.py::test_compose_header_decodes; here the sheet's real 0.25in margin
+    # isn't tall enough for one, so `filename_hint` is exercised end-to-end without asserting a
+    # header decode -- compose must still succeed (it's best-effort, never a failure).
     assert pyvips.Image.new_from_file(str(ROOT / "t/preview.png")).width == 200
 
     r = client.post(

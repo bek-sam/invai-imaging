@@ -21,9 +21,20 @@ def content_type_for(key: str) -> str:
     return mimetypes.guess_type(key)[0] or "application/octet-stream"
 
 
+def content_disposition_for(download_filename: str) -> str:
+    """`attachment; filename="..."` for a caller-supplied name (sheet id + order numbers, B-79).
+
+    The name never becomes the S3 key (that stays opaque, `objectKey`'s own invariant) -- only
+    this header, which is what a vendor/RIP operator sees when saving the downloaded file.
+    Quotes and newlines are stripped so the value can't break out of the header.
+    """
+    safe = download_filename.replace('"', "").replace("\r", "").replace("\n", "")
+    return f'attachment; filename="{safe}"'
+
+
 class Storage(Protocol):
     def download(self, key: str, dest: Path) -> None: ...
-    def upload(self, src: Path, key: str) -> None: ...
+    def upload(self, src: Path, key: str, download_filename: str | None = None) -> None: ...
     def put_bytes(self, data: bytes, key: str) -> None: ...
     def exists(self, key: str) -> bool: ...
 
@@ -45,7 +56,9 @@ class LocalStorage:
             raise NotFoundError(key)
         shutil.copyfile(path, dest)
 
-    def upload(self, src: Path, key: str) -> None:
+    def upload(self, src: Path, key: str, download_filename: str | None = None) -> None:
+        # Local storage (dev/test) has no ContentDisposition equivalent; the filename hint is a
+        # no-op here, same as S3Storage's ContentType headers have no local counterpart either.
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, path)
@@ -96,10 +109,11 @@ class S3Storage:
                 raise NotFoundError(key) from e
             raise
 
-    def upload(self, src: Path, key: str) -> None:
-        self.client.upload_file(
-            str(src), self.bucket, key, ExtraArgs={"ContentType": content_type_for(key)}
-        )
+    def upload(self, src: Path, key: str, download_filename: str | None = None) -> None:
+        extra_args = {"ContentType": content_type_for(key)}
+        if download_filename:
+            extra_args["ContentDisposition"] = content_disposition_for(download_filename)
+        self.client.upload_file(str(src), self.bucket, key, ExtraArgs=extra_args)
 
     def put_bytes(self, data: bytes, key: str) -> None:
         self.client.put_object(
