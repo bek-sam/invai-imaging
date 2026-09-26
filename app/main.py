@@ -333,6 +333,8 @@ class ComposeRequest(BaseModel):
     preview_width_px: int = Field(1200, ge=16, le=8000)
     label_gap_in: float = Field(compose.DEFAULT_LABEL_GAP_IN, ge=0, le=1)
     filename_hint: str | None = Field(None, max_length=150)
+    # Header QR payload (gate finding A): the short sheet id, so the QR always fits the band.
+    sheet_id: str | None = Field(None, min_length=1, max_length=64)
     header_height_in: float = Field(0.45, ge=0, le=6)
 
     @model_validator(mode="after")
@@ -374,6 +376,7 @@ def compose_sheet(req: ComposeRequest) -> dict:
         preview_width_px=req.preview_width_px,
         label_gap_in=req.label_gap_in,
         filename_hint=req.filename_hint,
+        sheet_id=req.sheet_id,
         header_height_in=req.header_height_in,
     )
     out = {
