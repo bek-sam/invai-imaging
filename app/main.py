@@ -172,7 +172,7 @@ class NestRequest(BaseModel):
     margin_in: float = Field(0.25, ge=0)
     max_length_in: float = Field(240.0, gt=0, le=240)
     allow_rotation: bool = True
-    label_height_in: float = Field(0.35, ge=0)
+    label_height_in: float = Field(0.42, ge=0)
 
 
 @app.post("/nest")
@@ -227,7 +227,7 @@ class ComposeRequest(BaseModel):
     length_in: float = Field(gt=0)
     dpi: int = Field(300, ge=36, le=1200)
     placements: list[ComposePlacementModel]
-    label_height_in: float = Field(0.35, ge=0)
+    label_height_in: float = Field(0.42, ge=0)
     out_key: str
     pdf_key: str | None = None
     preview_key: str
