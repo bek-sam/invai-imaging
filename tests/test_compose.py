@@ -18,9 +18,8 @@ from app.vips import ImageError
 from tests.helpers import solid_design
 
 DPI = 300
-# label_height_in tall enough for a real (random) UUID transfer_id's QR to clear the AC1
-# 0.33mm/module floor -- the *default* 0.35in isn't quite enough for a worst-case UUID (see
-# test_qr_module_floor_is_dpi_independent and the T-9-2 report's "AC1 finding").
+# A generous label_height_in for tests that aren't specifically about the AC1 module floor (see
+# DEFAULT_LABEL_HEIGHT_IN below and test_default_label_height_decodes_a_real_uuid for that).
 LABEL_HEIGHT_IN = 0.8
 GAP_IN = 0.125
 
@@ -184,16 +183,17 @@ def test_compose_fails_loudly_when_label_strip_too_short(tmp_path):
     assert found == {tid}
 
 
+DEFAULT_LABEL_HEIGHT_IN = 0.42  # must match NestRequest/ComposeRequest's Field default in main.py
+
+
 @pytest.mark.parametrize("dpi", [150, 200, 300])
-def test_default_label_height_still_short_for_a_real_uuid(tmp_path, dpi):
-    """Documents the T-9-2 report's "AC1 finding": at the *default* label_height_in (0.35in)
-    and label_gap_in (0.125in), a real (random) UUID transfer_id -- 31 modules with the quiet
-    zone kept -- needs 0.403in of label content, whatever the DPI (geometry, not raster). That's
-    still 0.053in short of the 0.35in default, so default `/compose` calls 422 on a real UUID
-    until label_height_in's shared default (imaging NestRequest/ComposeRequest, backend
-    LABEL_HEIGHT_IN) is raised -- outside this card's owned/granted paths. Once that lands,
-    drop the `pytest.raises` here and assert the QR decodes, matching
-    test_compose_qr_decodes_at_multiple_dpi.
+def test_default_label_height_decodes_a_real_uuid(tmp_path, dpi):
+    """Tech lead follow-up to the T-9-2 report's "AC1 finding": raising the shared
+    label_height_in default (imaging NestRequest/ComposeRequest, backend LABEL_HEIGHT_IN) from
+    0.35in to 0.42in closes the 0.053in gap a real (random) UUID transfer_id's QR (31 modules
+    with the quiet zone kept, 0.403in needed at the 0.33mm floor -- geometry, not raster) was
+    short by. Proves it at the *default* height, with a fresh random UUID each run, decoded at
+    150/200/300 DPI -- not the taller LABEL_HEIGHT_IN this file's other fixtures use.
     """
     import uuid
 
@@ -205,8 +205,12 @@ def test_default_label_height_still_short_for_a_real_uuid(tmp_path, dpi):
             tid, "a.png", 0.25, 0.25, 2.0, 3.0, False, Label("DB-1", "1/1", "M", "Black", "Cactus")
         )
     ]
-    with pytest.raises(ImageError, match="scannable"):
-        compose_sheet(store, 6.0, 4.0, dpi, placements, 0.35, "o.png", None, "p.png", 100)
+    compose_sheet(
+        store, 6.0, 4.0, dpi, placements, DEFAULT_LABEL_HEIGHT_IN, "o.png", None, "p.png", 100
+    )
+    pil = Image.open(tmp_path / "store" / str(dpi) / "o.png").convert("RGB")
+    found = {r.text for r in zxingcpp.read_barcodes(pil)}
+    assert found == {tid}
 
 
 @pytest.mark.parametrize("dpi", [150, 200, 300])

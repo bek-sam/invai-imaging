@@ -2,7 +2,7 @@ import pytest
 
 from app.nesting import Item, NestError, nest
 
-LABEL = 0.35
+LABEL = 0.42
 SPACING = 0.25
 MARGIN = 0.25
 EPS = 1e-6
