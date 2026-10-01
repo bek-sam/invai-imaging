@@ -219,8 +219,15 @@ def render_header(
     return im
 
 
-def _prepare_design(src: Path, dest: Path, w: int, h: int, rotated: bool) -> tuple[int, int]:
-    """Resize (and rotate) one design to fit w x h px; returns the result size."""
+def _prepare_design(
+    src: Path, dest: Path, w: int, h: int, rotated: bool, mirror: bool = False
+) -> tuple[int, int]:
+    """Resize (and rotate, and mirror) one design to fit w x h px; returns the result size.
+
+    `mirror` flips only the design artwork horizontally, for DTF vendors whose press/RIP expects
+    a pre-mirrored print -- it never touches the label strip, header or cut guides (compose_sheet
+    below), which stay normal-reading so a presser can still read and scan them on the sheet.
+    """
     img = load(src)
     sw, sh = (img.height, img.width) if rotated else (img.width, img.height)
     scale = min(w / sw, h / sh)
@@ -229,6 +236,8 @@ def _prepare_design(src: Path, dest: Path, w: int, h: int, rotated: bool) -> tup
     img = img.premultiply().resize(scale, kernel="lanczos3").unpremultiply().cast("uchar")
     if rotated:
         img = img.rot90()
+    if mirror:
+        img = img.fliphor()
     if img.width > w or img.height > h:
         img = img.crop(0, 0, min(img.width, w), min(img.height, h))
     save_png(img, dest, compression=1)
@@ -250,6 +259,7 @@ def compose_sheet(
     filename_hint: str | None = None,
     header_height_in: float = DEFAULT_HEADER_HEIGHT_IN,
     sheet_id: str | None = None,
+    mirror: bool = False,
 ) -> ComposeResult:
     started = time.monotonic()
     W, H = round(width_in * dpi), round(length_in * dpi)
@@ -296,10 +306,10 @@ def compose_sheet(
                 except NotFoundError as e:
                     raise ImageError(f"file not found: {p.file_key}") from e
                 sources[p.file_key] = path
-            vkey = (p.file_key, w, h, p.rotated)
+            vkey = (p.file_key, w, h, p.rotated, mirror)
             if vkey not in variants:
                 vpath = tmp / f"design-{len(variants)}.png"
-                vw, vh = _prepare_design(sources[p.file_key], vpath, w, h, p.rotated)
+                vw, vh = _prepare_design(sources[p.file_key], vpath, w, h, p.rotated, mirror)
                 variants[vkey] = (vpath, vw, vh)
             vpath, vw, vh = variants[vkey]
             layers.append((vpath, x + (w - vw) // 2, y + (h - vh) // 2))

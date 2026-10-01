@@ -23,6 +23,11 @@ from app.vips import ImageError, fit_box, from_pil, load, save_png, to_srgba
 
 MIN_SCALE = 0.6
 SCALE_STEP = 0.02
+# B-103: a photo scaled up more than this to fill its slot is flagged (it will look soft at print
+# size); an aspect ratio more than this many times away from the slot's own is flagged too (the
+# photo will be heavily letterboxed or cropped).
+UPSCALE_WARN = 1.5
+ASPECT_WARN = 1.5
 # Latin script, digits and ordinary punctuation. Anything else (emoji, symbols, other scripts,
 # control characters) is flagged for a human to look at; the bundled fonts may not have it.
 _ALLOWED = re.compile(r"^[A-Za-z0-9À-ɏ\s.,'’‘\"“”&!?\-–—:;()/#+@$%*]*$")
@@ -167,21 +172,39 @@ def render_slot(slot: Slot, text: str, dpi: int) -> tuple[Image.Image, bool]:
     return im, fits
 
 
-def render_photo_slot(slot: Slot, photo_path: Path, dpi: int) -> tuple[pyvips.Image, Flag | None]:
+def render_photo_slot(slot: Slot, photo_path: Path, dpi: int) -> tuple[pyvips.Image, list[Flag]]:
     """Fit (letterboxed, whole photo visible) or fill (cropped to cover) a buyer photo into its
     slot box. Flags `low_res_photo` when the photo's native resolution would print below the
-    150 DPI floor at the slot's physical size."""
+    150 DPI floor at the slot's physical size, `aspect_mismatch` when the photo's aspect ratio is
+    far enough from the slot's that it will be heavily letterboxed or cropped, and `upscale` when
+    the photo must be stretched more than UPSCALE_WARN to fill the slot at this DPI."""
     w, h = max(1, round(slot.w_in * dpi)), max(1, round(slot.h_in * dpi))
     photo = to_srgba(load(photo_path))
-    flag = None
+    flags: list[Flag] = []
     dpi_at_size = effective_dpi(photo.width, photo.height, slot.w_in, slot.h_in)
     if dpi_at_size is not None and dpi_at_size < DPI_ERROR:
-        flag = Flag(
-            slot.name,
-            "low_res_photo",
-            f"{dpi_at_size:.0f} DPI at {slot.w_in:g}x{slot.h_in:g}in; at least {DPI_ERROR} "
-            "is needed",
+        flags.append(
+            Flag(
+                slot.name,
+                "low_res_photo",
+                f"{dpi_at_size:.0f} DPI at {slot.w_in:g}x{slot.h_in:g}in; at least {DPI_ERROR} "
+                "is needed",
+            )
         )
+
+    photo_ratio, slot_ratio = photo.width / photo.height, w / h
+    ratio_diff = max(photo_ratio, slot_ratio) / min(photo_ratio, slot_ratio)
+    if ratio_diff > ASPECT_WARN:
+        verb = "cropped" if slot.fit == "fill" else "letterboxed with empty space"
+        flags.append(
+            Flag(
+                slot.name,
+                "aspect_mismatch",
+                f"photo is {photo_ratio:.2f}:1 but the slot is {slot_ratio:.2f}:1; it will be "
+                f"heavily {verb}",
+            )
+        )
+
     if slot.fit == "fill":
         scale = max(w / photo.width, h / photo.height)
         rw = max(1, round(photo.width * scale))
@@ -191,10 +214,19 @@ def render_photo_slot(slot: Slot, photo_path: Path, dpi: int) -> tuple[pyvips.Im
         img = resized.crop(left, top, w, h)
     else:
         rw, rh = fit_box(photo.width, photo.height, w, h)
+        scale = rw / photo.width
         resized = photo.resize(rw / photo.width, vscale=rh / photo.height)
         canvas = pyvips.Image.black(w, h, bands=4).copy(interpretation="srgb")
         img = canvas.composite2(resized, "over", x=round((w - rw) / 2), y=round((h - rh) / 2))
-    return img, flag
+    if scale > UPSCALE_WARN:
+        flags.append(
+            Flag(
+                slot.name,
+                "upscale",
+                f"photo is scaled up {scale:.1f}x to fill the slot at {dpi:g} DPI; it may look soft",
+            )
+        )
+    return img, flags
 
 
 def render_personalization(
@@ -233,9 +265,8 @@ def render_personalization(
             if photo_path is None:
                 result.flags.append(Flag(slot.name, "empty", "no photo given"))
                 continue
-            img, flag = render_photo_slot(slot, photo_path, dpi)
-            if flag:
-                result.flags.append(flag)
+            img, flags = render_photo_slot(slot, photo_path, dpi)
+            result.flags.extend(flags)
             canvas = canvas.composite2(img, "over", x=x, y=y)
             continue
 

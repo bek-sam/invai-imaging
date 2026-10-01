@@ -195,6 +195,19 @@ def nest(
     return sheets
 
 
+def overall_utilization(sheets: list[Sheet]) -> float:
+    """Length-weighted film use across the whole sheet set (B-41): total design area over total
+    film used, not a plain average of each sheet's own utilization -- a lightly filled last sheet
+    pulls this down by how much film it actually used, rather than counting as much as a full
+    one. Each sheet's `utilization` is area_i / (width * length_i), so weighting by length_in and
+    dividing by the total length recovers (sum of area_i) / (width * total length) without
+    needing the width again."""
+    total_length = sum(s.length_in for s in sheets)
+    if total_length <= 0:
+        return 0.0
+    return round(sum(s.utilization * s.length_in for s in sheets) / total_length, 4)
+
+
 def _to_sheet(index, placed, sheet_width_in, spacing, margin, header) -> Sheet:
     placements = []
     used = 0

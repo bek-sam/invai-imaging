@@ -1,6 +1,6 @@
 import pytest
 
-from app.nesting import Item, NestError, nest
+from app.nesting import Item, NestError, Sheet, nest, overall_utilization
 
 LABEL = 0.42
 SPACING = 0.25
@@ -94,6 +94,33 @@ def test_multi_sheet_split():
     assert sum(len(s.placements) for s in sheets) == 20
     assert [s.index for s in sheets] == list(range(len(sheets)))
     assert_valid(sheets, max_len=60)
+
+
+def test_overall_utilization_is_length_weighted_not_a_plain_average():
+    # Two sheets of equal length and utilization: weighted average equals either one's.
+    even = [Sheet(0, 100, 0.9), Sheet(1, 100, 0.9)]
+    assert overall_utilization(even) == pytest.approx(0.9)
+
+    # A short, lightly-filled last sheet pulls the overall number toward its own use by how much
+    # film it actually took, not by 50% as a plain average of the two percentages would.
+    uneven = [Sheet(0, 100, 0.9), Sheet(1, 10, 0.1)]
+    plain_average = (0.9 + 0.1) / 2
+    weighted = overall_utilization(uneven)
+    assert weighted == pytest.approx((0.9 * 100 + 0.1 * 10) / 110, abs=1e-4)
+    assert weighted > plain_average  # the short sheet counts for little, not half
+
+    assert overall_utilization([]) == 0.0
+
+
+def test_overall_utilization_matches_total_area_over_total_film():
+    sizes = [(11, 11), (10, 12), (4, 4), (12, 3), (3.5, 3.5), (9, 11), (5, 7)]
+    items = [Item(str(i), *sizes[i % len(sizes)], quantity=1 + i % 3) for i in range(30)]
+    sheets = nest(items, max_length_in=60)
+    assert len(sheets) > 1  # a real multi-sheet set, not a degenerate single-sheet case
+    total_area = sum(p.width_in * p.height_in for s in sheets for p in s.placements)
+    total_length = sum(s.length_in for s in sheets)
+    expected = total_area / (22.0 * total_length)  # default sheet_width_in
+    assert overall_utilization(sheets) == pytest.approx(expected, rel=1e-3)
 
 
 def test_item_too_big_raises():

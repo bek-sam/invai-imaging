@@ -99,8 +99,12 @@ def test_full_flow(client):
             "label_height_in": label_height_in,
         },
     )
-    sheets = r.json()["sheets"]
+    body = r.json()
+    sheets = body["sheets"]
     assert len(sheets) == 1 and len(sheets[0]["placements"]) == 3
+    # B-41: additive field, alongside each sheet's own `utilization` (a single sheet here, so the
+    # length-weighted overall figure equals that one sheet's).
+    assert body["overall_utilization"] == pytest.approx(sheets[0]["utilization"])
     sheet = sheets[0]
 
     r = client.post(

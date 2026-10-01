@@ -114,7 +114,9 @@ def test_photo_slot_fit_letterboxes_and_fill_covers(tmp_path):
         out_fit,
         photos={"p": photo_path},
     )
-    assert flags_for(res_fit, "p") == set()
+    # 4:1 photo in a 1:1 slot is a big aspect mismatch (B-103); the photo is downscaled, not
+    # upscaled, so no "upscale" flag.
+    assert flags_for(res_fit, "p") == {"aspect_mismatch"}
     img_fit = pyvips.Image.new_from_file(str(out_fit))
     # letterboxed to fit the width: the top corners of the square canvas stay transparent
     assert img_fit.crop(0, 0, 10, 10)[3].max() == 0
@@ -129,7 +131,7 @@ def test_photo_slot_fit_letterboxes_and_fill_covers(tmp_path):
         out_fill,
         photos={"p": photo_path},
     )
-    assert flags_for(res_fill, "p") == set()
+    assert flags_for(res_fill, "p") == {"aspect_mismatch"}
     img_fill = pyvips.Image.new_from_file(str(out_fill))
     # filled to cover the box: every corner is opaque
     assert img_fill.crop(0, 0, 10, 10)[3].min() == 255
@@ -139,11 +141,12 @@ def test_low_res_photo_is_flagged(tmp_path):
     photo_path = tmp_path / "small.png"
     PILImage.new("RGB", (50, 50), (0, 0, 0)).save(photo_path)
     out = tmp_path / "out.png"
-    # 4x4in slot from a 50x50px photo is ~12.5 effective DPI, far under the 150 DPI floor.
+    # 4x4in slot from a 50x50px photo is ~12.5 effective DPI, far under the 150 DPI floor, and
+    # needs an 8x upscale (400px / 50px) to fill it -- both get flagged.
     res = render_personalization(
         4, 4, [Slot("p", 0, 0, 4, 4, kind="photo")], {}, 100, out, photos={"p": photo_path}
     )
-    assert flags_for(res, "p") == {"low_res_photo"}
+    assert flags_for(res, "p") == {"low_res_photo", "upscale"}
 
 
 def test_photo_slot_without_a_value_is_flagged_empty(tmp_path):
@@ -152,6 +155,35 @@ def test_photo_slot_without_a_value_is_flagged_empty(tmp_path):
         2, 2, [Slot("p", 0, 0, 2, 2, kind="photo")], {}, 100, out, photos={}
     )
     assert flags_for(res, "p") == {"empty"}
+
+
+def test_photo_slot_upscale_flagged_without_aspect_mismatch(tmp_path):
+    photo_path = tmp_path / "small-square.png"
+    PILImage.new("RGB", (350, 350), (10, 10, 10)).save(photo_path)  # same 1:1 ratio as the slot
+    out = tmp_path / "out.png"
+    # 2x2in slot at 300 DPI is 600x600px: a 1.71x upscale from the 350x350px photo, but the photo
+    # is still 175 DPI at the slot's physical size (above the 150 floor) -- isolates the upscale
+    # flag from low_res_photo.
+    res = render_personalization(
+        2, 2, [Slot("p", 0, 0, 2, 2, kind="photo")], {}, 300, out, photos={"p": photo_path}
+    )
+    assert flags_for(res, "p") == {"upscale"}
+
+
+def test_photo_slot_aspect_mismatch_without_upscale(tmp_path):
+    photo_path = tmp_path / "wide.png"
+    PILImage.new("RGB", (900, 300), (10, 10, 10)).save(photo_path)  # 3:1, plenty of pixels
+    out = tmp_path / "out.png"
+    res = render_personalization(
+        2,
+        2,
+        [Slot("p", 0, 0, 2, 2, kind="photo", fit="fill")],
+        {},
+        100,
+        out,
+        photos={"p": photo_path},
+    )
+    assert flags_for(res, "p") == {"aspect_mismatch"}
 
 
 # --- AC4: missing glyphs -------------------------------------------------------------------------

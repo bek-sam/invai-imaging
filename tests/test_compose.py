@@ -435,3 +435,54 @@ def test_default_settings_header_and_transfer_qrs_all_decode(tmp_path, dpi):
     found = {r.text for r in zxingcpp.read_barcodes(pil)}
     assert set(tids) <= found
     assert filename_hint in found
+
+
+def test_mirror_flips_only_the_design_not_the_label(tmp_path):
+    """B-103: `mirror=True` flips the design artwork (some DTF vendors' press/RIP expects a
+    pre-mirrored print), but the label strip's QR must still decode -- a mirrored QR is not a
+    standard, scannable code, and the label is for a human presser, not the garment."""
+    store = LocalStorage(tmp_path / "store")
+    # Left half red, right half blue: flipping swaps which side is which color.
+    design = Image.new("RGBA", (400, 200), (0, 0, 0, 0))
+    design.paste((220, 20, 20, 255), (0, 0, 200, 200))
+    design.paste((20, 20, 220, 255), (200, 0, 400, 200))
+    design.save(tmp_path / "store" / "a.png")
+
+    placement = ComposePlacement(
+        "11111111-2222-3333-4444-555555555555",
+        "a.png",
+        0.25,
+        0.25,
+        4.0,
+        2.0,
+        False,
+        Label("DB-1001", "1/1", "M", "Black", "Desert Bloom"),
+    )
+    common = {
+        "storage": store,
+        "width_in": 5.0,
+        "length_in": 3.0,
+        "dpi": DPI,
+        "placements": [placement],
+        "label_height_in": LABEL_HEIGHT_IN,
+        "pdf_key": None,
+        "preview_width_px": 300,
+        "label_gap_in": GAP_IN,
+    }
+    compose_sheet(out_key="out/normal.png", preview_key="out/normal-preview.png", **common)
+    compose_sheet(
+        out_key="out/mirrored.png", preview_key="out/mirrored-preview.png", mirror=True, **common
+    )
+
+    left_x, right_x = round(1.0 * DPI), round(3.5 * DPI)
+    y = round(1.0 * DPI)
+    normal = pyvips.Image.new_from_file(str(tmp_path / "store/out/normal.png"))
+    mirrored = pyvips.Image.new_from_file(str(tmp_path / "store/out/mirrored.png"))
+    assert normal.getpoint(left_x, y)[0] > 150  # red on the left, normally
+    assert mirrored.getpoint(left_x, y)[2] > 150  # blue on the left, mirrored
+    assert mirrored.getpoint(right_x, y)[0] > 150  # red is now on the right
+
+    # The label's QR still decodes: mirroring never touches the label strip.
+    pil = Image.open(tmp_path / "store/out/mirrored.png").convert("RGB")
+    found = {r.text for r in zxingcpp.read_barcodes(pil)}
+    assert found == {placement.transfer_id}

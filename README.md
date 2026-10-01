@@ -51,8 +51,9 @@ request validation errors and missing keys (`file not found: <key>`).
 | `POST /qa/check` | `{file_key, target_width_in?, target_height_in?}` | `{width_px, height_px, has_alpha, soft_alpha_ratio, effective_dpi?, issues: [{code, severity, message}]}` |
 | `POST /qa/clean-alpha` | `{file_key, out_key, threshold=128}` | `{key}` |
 | `POST /render/personalization` | `{template: {width_in, height_in, background_key?, slots: [...]}, values, out_key, dpi=300}` | `{key, width_px, height_px, flags: [{slot, code, message}]}` |
-| `POST /nest` | `{items: [{id, width_in, height_in, quantity=1}], sheet_width_in=22, spacing_in=0.25, margin_in=0.25, max_length_in=240, allow_rotation=true, label_height_in=0.42}` | `{sheets: [{index, length_in, utilization, placements: [{id, copy, x_in, y_in, width_in, height_in, rotated}]}]}` |
-| `POST /compose` | `{width_in, length_in, dpi=300, placements: [{transfer_id, file_key, x_in, y_in, width_in, height_in, rotated, label: {order_no, item_no, size, color, design, reprint}}], label_height_in=0.42, out_key, pdf_key?, preview_key, preview_width_px=1200}` | `{key, pdf_key?, preview_key, width_px, height_px, bytes}` |
+| `POST /nest` | `{items: [{id, width_in, height_in, quantity=1}], sheet_width_in=22, spacing_in=0.25, margin_in=0.25, max_length_in=240, allow_rotation=true, label_height_in=0.42}` | `{sheets: [{index, length_in, utilization, placements: [{id, copy, x_in, y_in, width_in, height_in, rotated}]}], overall_utilization}` |
+| `POST /compose` | `{width_in, length_in, dpi=300, placements: [{transfer_id, file_key, x_in, y_in, width_in, height_in, rotated, label: {order_no, item_no, size, color, design, reprint}}], label_height_in=0.42, out_key, pdf_key?, preview_key, preview_width_px=1200, mirror=false}` | `{key, pdf_key?, preview_key, width_px, height_px, bytes}` |
+| `POST /preview` | `{file_key, out_key, max_px=512 (64..2048)}` | `{out_key, width_px, height_px}` |
 | `POST /mockup` | `{design_key, blank_color_hex, placement: "front"\|"back", out_key, size_px=1200}` | `{key}` |
 | `POST /labels/mock` | `{shipment_id, carrier, service, tracking_code, from, to, weight_oz, out_key}` (addresses: `name, city, state, zip`) | `{key}` |
 | `POST /sample-art` | `{text, out_key, width_in, height_in, dpi=300, color_hex="#111111"}` | `{key}` |
@@ -67,6 +68,10 @@ request validation errors and missing keys (`file not found: <key>`).
   margin), not `max_length_in`; `utilization` = sum of design areas / (sheet width x length).
   Items that don't fit go to the next sheet; an item larger than the sheet in both orientations
   is a 422. Several MaxRects heuristics and orderings run per sheet and the best one wins.
+  `overall_utilization` (B-41) is the length-weighted film use across every sheet in the set --
+  total design area over total film used, not a plain average of each sheet's own
+  `utilization` -- so a lightly-filled last sheet pulls it down by how much film it actually took,
+  not by counting as much as a full one. Additive alongside `sheets`.
 - **Compose.** Pass the nest placements through unchanged (plus `transfer_id`, `file_key`,
   `label`). The art is fitted inside the placement box (aspect kept, centered) and rotated 90°
   clockwise when `rotated`. Under each design, inside the label strip: an opaque white QR code
@@ -75,7 +80,19 @@ request validation errors and missing keys (`file not found: <key>`).
   (default 0.42) must match what was passed to `/nest`. The PNG is RGBA with a transparent
   background and 300 DPI metadata; the PDF is one page at the exact physical size (sheets over
   200in use PDF `/UserUnit`, since plain PDF pages top out at 200in); the preview is
-  `preview_width_px` wide, transparent, with the sheet's aspect ratio.
+  `preview_width_px` wide, transparent, with the sheet's aspect ratio. `mirror` (default `false`)
+  flips only the design artwork horizontally, for DTF vendors whose press/RIP expects a
+  pre-mirrored print -- it never touches the label strip, header or cut guides, so a presser can
+  still read and scan them on the sheet. Any input carrying an embedded ICC profile (including a
+  profiled CMYK file) is color-managed through it; CMYK without a profile still converts, never
+  rejected, through libvips' built-in formula (checked live against its own no-profile fallback:
+  same numbers). The profile check itself is cheap, but the real color transform is skipped
+  whenever a file has no profile (the common case) -- paying it unconditionally cost measured
+  ~2ms on a 1.3MP design and ~20ms on a 15MP one, a budget-breaking slowdown across a full sheet.
+- **Preview.** A small sRGB PNG thumbnail of any supported input (design art, a PDF's first
+  page, ...), for catalog/order-item previews (T-P1-4). Longest side is at most `max_px`, never
+  upscaled; vector input (PDF/SVG) rasterizes at QA's own recommended print DPI (300), same as
+  `/qa/check`'s own default.
 - **QA.** `effective_dpi` = pixels / target inches on the limiting axis. `low_dpi` is an error
   under 150 and a warning under 300. `soft_alpha_ratio` = pixels with 0 < alpha < 255 / pixels with
   alpha > 0; `soft_alpha` warns above 5% (anti-aliased edges alone are usually 1–3%). `no_alpha`
@@ -87,8 +104,11 @@ request validation errors and missing keys (`file not found: <key>`).
   aligned `left|center|right`. If it doesn't fit it shrinks in 2% steps down to 60% of
   `font_size_pt`; past that it renders at 60%, is clipped to the slot and gets `overflow`. Other
   flags: `empty` (missing/blank value; nothing drawn), `too_long` (over `max_chars`; still
-  drawn), `suspicious_chars` (emoji, symbols, non-Latin scripts, control characters). A
-  `background_key` image is stretched to the template size.
+  drawn), `suspicious_chars` (emoji, symbols, non-Latin scripts, control characters). A photo
+  slot also flags `aspect_mismatch` (the photo's aspect ratio is far enough from the slot's that
+  it will be heavily letterboxed or cropped) and `upscale` (the photo must be stretched more than
+  1.5x to fill the slot at the render DPI, on top of the existing `low_res_photo` for an
+  absolute DPI floor). A `background_key` image is stretched to the template size.
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
   shading, the design fitted into the chest box. Opaque PNG on a light gray background.
 - **Mock label.** 4x6in PDF: service box, carrier/service, weight, from/to, Code128 tracking
@@ -111,6 +131,19 @@ in memory: designs are pre-scaled into temp PNGs, the sheet is a lazy pyvips `bl
 `insert` graph streamed to `pngsave` top to bottom, and the PDF is streamed from that PNG in strips.
 Temp disk use is about the output size plus the pre-scaled designs. Dense, full-color artwork
 compresses worse than the sample art, so expect larger files and somewhat longer PNG encodes.
+
+**T-P1-2 (ICC-aware `to_srgba`, mirror, `/preview`, `overall_utilization`):** re-measured on the
+same laptop with a realistic 93-design, 22in-wide sheet set (same size mix as
+`tests/test_nesting.py`'s `test_realistic_size_mix_nests_dense`, split by `/nest` into sheets of
+236-239in and one 56in sheet): 40 designs at 238.9in, PNG + preview, 397 MB peak RSS; 15 designs
+at 56.5in, PNG + PDF + preview, 477 MB. Both within the existing budget (no RSS regression). Wall
+time on this run (5.5-6.5s for the long sheet) was noisy on a shared dev machine, so it isn't a
+clean before/after; the actual cost driver was isolated instead: `to_srgba` now calls
+`icc_transform` only when a file carries an embedded ICC profile (`get_typeof("icc-profile-data")
+!= 0`), confirmed by microbenchmark to cost ~0.03ms/call for a design with no profile (same as
+before this change) rather than ~2-20ms/call if paid unconditionally -- the first version of this
+change called `icc_transform` on every image and was reverted for exactly that reason. `/preview`
+on a single 1200x900 design: ~27ms, no measurable RSS impact (it never loads a full sheet).
 
 ## Layout
 

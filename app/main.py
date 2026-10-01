@@ -321,7 +321,10 @@ def nest(req: NestRequest) -> dict:
                 "placements": [p.__dict__ for p in s.placements],
             }
             for s in sheets
-        ]
+        ],
+        # B-41: length-weighted film use across the whole sheet set, alongside each sheet's own
+        # `utilization` above -- additive field, existing callers reading `sheets` are unaffected.
+        "overall_utilization": nesting.overall_utilization(sheets),
     }
 
 
@@ -363,6 +366,9 @@ class ComposeRequest(BaseModel):
     # Header QR payload (gate finding A): the short sheet id, so the QR always fits the band.
     sheet_id: str | None = Field(None, min_length=1, max_length=64)
     header_height_in: float = Field(0.45, ge=0, le=6)
+    # B-103: some DTF vendors' press/RIP expects a pre-mirrored print. Flips only the design
+    # artwork, never the label strip or header, so a presser can still read and scan them.
+    mirror: bool = False
 
     @model_validator(mode="after")
     def _pdf_length_cap(self) -> "ComposeRequest":
@@ -405,6 +411,7 @@ def compose_sheet(req: ComposeRequest) -> dict:
         filename_hint=req.filename_hint,
         sheet_id=req.sheet_id,
         header_height_in=req.header_height_in,
+        mirror=req.mirror,
     )
     out = {
         "key": req.out_key,
