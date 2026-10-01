@@ -203,11 +203,19 @@ class TemplateModel(BaseModel):
         return self
 
 
+# B-103 added `aspect_mismatch` and `upscale` photo-flag codes. The backend client
+# (invai-backend/src/integrations/imaging/client.ts) parses `flags[].code` with a closed enum
+# that doesn't know them yet, so they're opt-in: a caller passes `photo_flags: true` to get them.
+# Default response stays byte-for-byte what it was before this card.
+_NEW_PHOTO_FLAG_CODES = {"aspect_mismatch", "upscale"}
+
+
 class PersonalizationRequest(BaseModel):
     template: TemplateModel
     values: dict[str, str] = Field(default_factory=dict, max_length=50)
     out_key: str = Key
     dpi: int = Field(300, ge=36, le=1200)
+    photo_flags: bool = False
 
     @field_validator("values")
     @classmethod
@@ -236,11 +244,14 @@ def render_personalization(req: PersonalizationRequest) -> dict:
             t.width_in, t.height_in, slots, req.values, req.dpi, out, bg, photos
         )
         get_storage().upload(out, req.out_key)
+    flags = res.flags
+    if not req.photo_flags:
+        flags = [f for f in flags if f.code not in _NEW_PHOTO_FLAG_CODES]
     return {
         "key": req.out_key,
         "width_px": res.width_px,
         "height_px": res.height_px,
-        "flags": [f.__dict__ for f in res.flags],
+        "flags": [f.__dict__ for f in flags],
         "render_ms": round((time.perf_counter() - started) * 1000),
     }
 

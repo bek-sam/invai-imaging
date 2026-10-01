@@ -381,6 +381,45 @@ def test_personalization_photo_slot_end_to_end(client):
     assert img.crop(0, 0, 10, 10)[3].min() == 255  # filled, fully opaque
 
 
+def _upscale_photo_personalization_payload(out_key: str) -> dict:
+    # 350x350px photo into a 2x2in slot at 300 DPI (600x600px) is a 1.71x upscale -- triggers the
+    # "upscale" flag code (added by B-103) without also triggering low_res_photo or aspect_mismatch.
+    photo_path = ROOT / "t/small-square.png"
+    photo_path.parent.mkdir(parents=True, exist_ok=True)
+    PILImage.new("RGB", (350, 350), (10, 10, 10)).save(photo_path)
+    return {
+        "template": {
+            "width_in": 2,
+            "height_in": 2,
+            "slots": [{"name": "p", "kind": "photo", "x_in": 0, "y_in": 0, "w_in": 2, "h_in": 2}],
+        },
+        "values": {"p": "t/small-square.png"},
+        "out_key": out_key,
+    }
+
+
+def test_personalization_default_response_has_no_new_photo_flag_codes(client):
+    # The backend client's `flags[].code` enum doesn't know "upscale"/"aspect_mismatch" yet
+    # (invai-backend/src/integrations/imaging/client.ts:74-81). Without opting in, the response
+    # must stay exactly what it was before B-103: a render that would otherwise carry an "upscale"
+    # flag comes back with no flags at all, not a flag with a code the backend can't parse.
+    r = client.post(
+        "/render/personalization",
+        json=_upscale_photo_personalization_payload("t/upscale-default.png"),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["flags"] == []
+
+
+def test_personalization_photo_flags_opt_in_returns_new_codes(client):
+    payload = _upscale_photo_personalization_payload("t/upscale-optin.png")
+    payload["photo_flags"] = True
+    r = client.post("/render/personalization", json=payload)
+    assert r.status_code == 200, r.text
+    codes = {f["code"] for f in r.json()["flags"]}
+    assert codes == {"upscale"}
+
+
 def test_errors_are_422_with_detail(client):
     r = client.post("/qa/check", json={"file_key": "nope/missing.png"})
     assert r.status_code == 422
