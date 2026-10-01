@@ -194,6 +194,56 @@ def test_full_flow(client):
     assert (float(pages[1].mediabox.width), float(pages[1].mediabox.height)) == (144, 72)
 
 
+def test_preview_endpoint(client):
+    (ROOT / "t").mkdir(parents=True, exist_ok=True)
+    # Downscaled: longest side capped at max_px, aspect kept, sRGB with alpha.
+    solid_design(ROOT / "t/preview-src.png", 800, 400)
+    r = client.post(
+        "/preview", json={"file_key": "t/preview-src.png", "out_key": "t/preview-out.png"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"out_key": "t/preview-out.png", "width_px": 512, "height_px": 256}
+    img = pyvips.Image.new_from_file(str(ROOT / "t/preview-out.png"))
+    assert (img.width, img.height, img.bands) == (512, 256, 4)
+    assert img.interpretation == "srgb"
+
+    # Never upscaled: a source already smaller than max_px keeps its native size.
+    solid_design(ROOT / "t/preview-small.png", 100, 50)
+    r = client.post(
+        "/preview",
+        json={
+            "file_key": "t/preview-small.png",
+            "out_key": "t/preview-small-out.png",
+            "max_px": 512,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"out_key": "t/preview-small-out.png", "width_px": 100, "height_px": 50}
+
+    # A PDF's first page previews the same way (gate convention: vector art rasterizes at
+    # qa.DPI_WARN, same as /qa/check).
+    pdf_path = ROOT / "t/preview.pdf"
+    c = canvas.Canvas(str(pdf_path), pagesize=(2 * inch, 1 * inch))
+    c.setFillColorRGB(0.2, 0.4, 0.8)
+    c.rect(0, 0, 2 * inch, 1 * inch, fill=1)
+    c.save()
+    r = client.post(
+        "/preview", json={"file_key": "t/preview.pdf", "out_key": "t/preview-pdf-out.png"}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["width_px"] / body["height_px"] == pytest.approx(2.0, rel=0.01)
+
+    r = client.post("/preview", json={"file_key": "t/missing.png", "out_key": "t/x.png"})
+    assert r.status_code == 422
+    assert "missing.png" in r.json()["detail"]
+
+    r = client.post(
+        "/preview", json={"file_key": "t/preview-src.png", "out_key": "t/x.png", "max_px": 10}
+    )
+    assert r.status_code == 422
+
+
 def test_personalization_endpoint(client):
     r = client.post(
         "/render/personalization",

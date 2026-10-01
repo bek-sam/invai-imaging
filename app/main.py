@@ -19,7 +19,7 @@ from app.guard import GuardMiddleware, limiter
 from app.limits import declared_type_error
 from app.pdf import PDF_MAX_LENGTH_IN
 from app.storage import NotFoundError, S3Storage, Storage, get_storage
-from app.vips import ImageError, workdir
+from app.vips import ImageError, load, save_png, to_srgba, workdir
 
 log = logging.getLogger("invai.imaging")
 
@@ -243,6 +243,33 @@ def render_personalization(req: PersonalizationRequest) -> dict:
         "flags": [f.__dict__ for f in res.flags],
         "render_ms": round((time.perf_counter() - started) * 1000),
     }
+
+
+# --- preview --------------------------------------------------------------------------------
+
+
+class PreviewRequest(BaseModel):
+    file_key: str = Key
+    out_key: str = Key
+    max_px: int = Field(512, ge=64, le=2048)
+
+
+@app.post("/preview")
+def preview(req: PreviewRequest) -> dict:
+    """A small sRGB PNG thumbnail of any supported input (design art, a PDF's first page, ...),
+    for catalog/order-item previews (T-P1-4). Longest side is at most `max_px`, never upscaled."""
+    with workdir() as tmp:
+        src = _download(req.file_key, tmp / "input")
+        # Vector input (PDF/SVG) has no native pixel size; rasterize at QA's own recommended
+        # print DPI (qa.DPI_WARN), same convention as /qa/check. Raster formats ignore target_dpi.
+        img = to_srgba(load(src, access="sequential", target_dpi=qa.DPI_WARN))
+        scale = min(1.0, req.max_px / max(img.width, img.height))
+        if scale < 1.0:
+            img = img.premultiply().resize(scale, kernel="lanczos3").unpremultiply().cast("uchar")
+        out = tmp / "preview.png"
+        save_png(img, out)
+        get_storage().upload(out, req.out_key)
+    return {"out_key": req.out_key, "width_px": img.width, "height_px": img.height}
 
 
 # --- nesting ------------------------------------------------------------------------------
