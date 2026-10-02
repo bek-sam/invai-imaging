@@ -32,9 +32,10 @@ request validation errors and missing keys (`file not found: <key>`).
 | `IMAGING_SHARED_SECRET` | `invai-imaging-dev-secret` | Every path but `/health` needs `X-Imaging-Secret: <secret>` (constant-time compare), else `401`. A comma-separated list accepts each entry (rotation). The backend sends its own `IMAGING_SHARED_SECRET`. |
 | `IMAGING_ENV` | `development` (`production` in the Docker image) | `production` refuses to start on the dev secret or one under 32 chars. |
 | `IMAGING_DEV_ENDPOINTS` | `false` | `/labels/mock` and `/sample-art` answer `404` unless `true`. Local dev (`.env.example`) sets it; the backend's mock carrier and the seed need it. |
-| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose` and `/render/personalization` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
+| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose`, `/render/personalization`, `/photo/render` and `/photo/zip` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
 | `IMAGING_RETRY_AFTER_S` | `5` | The `Retry-After` value. |
 | `IMAGING_MAX_DECODE_PIXELS` | `570000000` | Pixel cap checked from the header before decoding (raster, SVG size, and PDF page size × DPI). |
+| `IMAGING_PHOTO_TEMPLATE_CACHE` | `4` | Listing-photo templates kept drawn per (garment, view, size), about 20–40 MB each at 2000 px. |
 
 - Inputs are PNG, JPEG, WebP, TIFF, SVG or PDF by magic bytes, loaded with that format's loader
   only (libvips' untrusted loaders are blocked). A key with an extension (`…/<uuid>.png`) must
@@ -55,6 +56,10 @@ request validation errors and missing keys (`file not found: <key>`).
 | `POST /compose` | `{width_in, length_in, dpi=300, placements: [{transfer_id, file_key, x_in, y_in, width_in, height_in, rotated, label: {order_no, item_no, size, color, design, reprint}}], label_height_in=0.42, out_key, pdf_key?, preview_key, preview_width_px=1200, mirror=false}` | `{key, pdf_key?, preview_key, width_px, height_px, bytes}` |
 | `POST /preview` | `{file_key, out_key, max_px=512 (64..2048)}` | `{out_key, width_px, height_px}` |
 | `POST /mockup` | `{design_key, blank_color_hex, placement: "front"\|"back", out_key, size_px=1200}` | `{key}` |
+| `POST /photo/palette` | `{design_key}` | `{colors: [{hex, share}], light_share, dark_share, transparent_share}` |
+| `GET /photo/templates` | | `[{garment, view, placement, print_areas: {front\|back: {w_in, h_in}}, drawn}]` |
+| `POST /photo/render` | `{design_key, design_width_in, design_height_in, placement, garment, view, blank_hex, underbase_preview=false, preset, out_key, xmp_subjects=[]}` | `{key, width_px, height_px, format, print_box_px: [x,y,w,h], checks: {passes, failures, background_pure_white, fill_ratio, longest_side_px}, print_area_px, scale, underbase_applied, bytes, render_ms}` |
+| `POST /photo/zip` | `{items: [{key, name}], out_key}` | `{key, bytes}` |
 | `POST /labels/mock` | `{shipment_id, carrier, service, tracking_code, from, to, weight_oz, out_key}` (addresses: `name, city, state, zip`) | `{key}` |
 | `POST /sample-art` | `{text, out_key, width_in, height_in, dpi=300, color_hex="#111111"}` | `{key}` |
 
@@ -109,6 +114,36 @@ request validation errors and missing keys (`file not found: <key>`).
   it will be heavily letterboxed or cropped) and `upscale` (the photo must be stretched more than
   1.5x to fill the slot at the render DPI, on top of the existing `low_res_photo` for an
   absolute DPI floor). A `background_key` image is stretched to the template size.
+- **Listing photos (T-26-2).** `/photo/*` keys must be `<companyId uuid>/...`; every input key
+  must share `out_key`'s company prefix, else **400** `{detail}` (the one non-422 error here).
+  Templates: `tee`, `hoodie`, `crewneck`, `tank` × `front_flat`, `folded`, `back`,
+  `on_model_white`, all drawn in code (`app/garments.py`, inches on an adult L; the on-model
+  figure is a neutral grey illustration, not photoreal). Print areas: tee front 12×16, back 14×16;
+  hoodie front 12×9 (above the pocket), back 14×16; crewneck front 12×14, back 14×16; tank front
+  10×13, back 10×14. `view: back` needs `placement: back` (the back print file; without one the
+  backend skips that view), every other view `front` (422 otherwise). The design covers exactly
+  `design_width_in × design_height_in` at the template's scale, horizontally centered on the
+  print area and top-aligned to it; it is never scaled up, and a design larger than the print
+  area is scaled down (`scale` < 1) with `design_larger_than_print_area` in `failures`. On
+  `folded` the part below the fold is hidden, as on a real folded shirt. The blank is exactly
+  `blank_hex` wherever the template is unshaded; folds bend (displace) and darken the print.
+  `underbase_preview` on a blank with sRGB luma < 0.45 shows semi-transparent design pixels over
+  white ink (alpha ≥ 25% gets full underbase); on lighter blanks it changes nothing.
+  Presets: `amazon_main` 2000×2000 (white required, fill ≥ 0.85, longest ≥ 1600, photo
+  required), `amazon_alt` 2000×2000 (≥ 1000), `etsy` 2700×2025 (≥ 2000), `shopify` 2048×2048,
+  `tiktok` 1600×1600 (≥ 600), `walmart` 2000×2000 (white required, ≥ 1500). Output is JPEG (Q92,
+  4:4:4, sRGB ICC embedded), or PNG when `out_key` ends in `.png`, with the product on a pure RGB
+  255 background. Checks run on the encoded file: `background_pure_white` = every pixel outside
+  the product (grown to whole 8×8 JPEG blocks, where compression ringing lives) is exactly
+  255,255,255; `fill_ratio` = the product bounding box's share of the frame on its limiting side
+  (the product spans 90%; on-model 95%, where the legs leave the frame); `longest_side_px`.
+  Failure codes: `design_larger_than_print_area`, `illustration_not_photo` (drawn templates,
+  `amazon_main` only), `background_not_white`, `fill_below_min`, `too_small`; `passes` = no
+  failures. `xmp_subjects` (≤ 20, 1–100 chars) are written as XMP `dc:subject` (JPEG APP1, PNG
+  iTXt `XML:com.adobe.xmp`); an empty list writes no XMP. Palette: up to 6 alpha-weighted colors
+  whose shares sum to 1 over opaque pixels (the tail is folded into the nearest kept color);
+  light = luma ≥ 0.75, dark ≤ 0.25; deterministic. Zip: stdlib, names sanitised (no `..`, no
+  absolute paths, odd characters → `_`, duplicates get `-2`), images stored, others deflated.
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
   shading, the design fitted into the chest box. Opaque PNG on a light gray background.
 - **Mock label.** 4x6in PDF: service box, carrier/service, weight, from/to, Code128 tracking
@@ -145,6 +180,14 @@ before this change) rather than ~2-20ms/call if paid unconditionally -- the firs
 change called `icc_transform` on every image and was reverted for exactly that reason. `/preview`
 on a single 1200x900 design: ~27ms, no measurable RSS impact (it never loads a full sheet).
 
+**T-26-2 listing photos** (same laptop, `uv run python bench/photo_bench.py`, sample art
+3000×3600 px placed at 10×12 in, `amazon_alt` 2000×2000 JPEG): render 0.18–0.23 s average with
+the template drawn (cold, max 0.38 s), 0.09–0.11 s with it cached. The first render in a fresh
+process peaks at ~305 MB RSS (from a 58 MB base: +80 template draw, +110 design decode and vips
+thread start, +55 encode). Across all 16 templates RSS climbs to a 570–700 MB high-water mark
+(4 cached templates plus allocator high-water; a cache of 1 still plateaus near 455 MB), so a
+photo-set job should count on ~0.7 GB, like a compose. Zip of 48 renders (8.8 MB): 0.01 s.
+
 ## Layout
 
 ```
@@ -155,6 +198,10 @@ app/pdf.py         streaming RGBA -> PDF writer (true physical size)
 app/qa.py          DPI / alpha checks, clean-alpha
 app/render.py      personalization templates
 app/mockups.py     vector t-shirt mockups
+app/garments.py    listing-photo garment templates (4 garments x 4 views, inches)
+app/photos.py      listing photos: composite, presets and checks, XMP, palette, zip
+app/keys.py        company-prefix checks for /photo/* keys
+bench/             photo_bench.py: listing-photo budgets and contact sheet
 app/labels.py      4x6 mock shipping label (reportlab)
 app/sample_art.py  seed artwork
 app/fonts.py       bundled OFL fonts (app/fonts, licenses alongside)

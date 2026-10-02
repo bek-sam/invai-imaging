@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # Pixel cap on any decode (raster header, SVG size, PDF page x DPI), checked before pixels
     # are decoded: 22 x 240in at 300 DPI x 1.2 is about 570M pixels.
     imaging_max_decode_pixels: int = Field(570_000_000, ge=1)
+    # Listing-photo templates kept drawn per (garment, view, size), ~20-40 MB each at 2000 px.
+    imaging_photo_template_cache: int = Field(4, ge=1, le=64)
 
     def shared_secrets(self) -> list[str]:
         return [s.strip() for s in self.imaging_shared_secret.split(",") if s.strip()]

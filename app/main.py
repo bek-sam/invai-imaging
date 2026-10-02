@@ -13,9 +13,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app import compose, fonts, labels, mockups, nesting, qa, render, sample_art
+from app import compose, fonts, garments, labels, mockups, nesting, photos, qa, render, sample_art
 from app.config import production_config_error, settings
 from app.guard import GuardMiddleware, limiter
+from app.keys import KeyScopeError, check_scope, company_of
 from app.limits import declared_type_error
 from app.pdf import PDF_MAX_LENGTH_IN
 from app.storage import NotFoundError, S3Storage, Storage, get_storage
@@ -69,6 +70,11 @@ async def image_error(_: Request, exc: ImageError):
 @app.exception_handler(NotFoundError)
 async def not_found(_: Request, exc: NotFoundError):
     return JSONResponse(status_code=422, content={"detail": f"file not found: {exc}"})
+
+
+@app.exception_handler(KeyScopeError)
+async def key_scope_error(_: Request, exc: KeyScopeError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.exception_handler(nesting.NestError)
@@ -457,6 +463,141 @@ def mockup(req: MockupRequest) -> dict:
         im.save(out, optimize=False, compress_level=6)
         get_storage().upload(out, req.out_key)
     return {"key": req.out_key}
+
+
+# --- listing photos (T-26-2) ----------------------------------------------------------------
+
+Garment = Literal["tee", "hoodie", "crewneck", "tank"]
+PhotoView = Literal["front_flat", "folded", "back", "on_model_white"]
+PhotoPreset = Literal["amazon_main", "amazon_alt", "etsy", "shopify", "tiktok", "walmart"]
+
+
+class PhotoPaletteRequest(BaseModel):
+    design_key: str = Key
+
+
+@app.post("/photo/palette")
+def photo_palette(req: PhotoPaletteRequest) -> dict:
+    company_of(req.design_key, "design_key")
+    with workdir() as tmp:
+        return photos.palette(_download(req.design_key, tmp / "design"))
+
+
+@app.get("/photo/templates")
+def photo_templates() -> list[dict]:
+    out = []
+    for t in garments.all_templates():
+        a = t.print_area
+        out.append(
+            {
+                "garment": t.garment,
+                "view": t.view,
+                "placement": t.placement,
+                "print_areas": {t.placement: {"w_in": a.w, "h_in": a.h}},
+                "drawn": t.drawn,
+            }
+        )
+    return out
+
+
+class PhotoRenderRequest(BaseModel):
+    design_key: str = Key
+    design_width_in: float = Field(gt=0, le=60)
+    design_height_in: float = Field(gt=0, le=60)
+    placement: Literal["front", "back"] = "front"
+    garment: Garment
+    view: PhotoView
+    blank_hex: str = Field(pattern=r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+    underbase_preview: bool = False
+    preset: PhotoPreset
+    out_key: str = Key
+    xmp_subjects: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("xmp_subjects")
+    @classmethod
+    def _subjects(cls, v: list[str]) -> list[str]:
+        for s in v:
+            if not 1 <= len(s) <= 100:
+                raise ValueError("each XMP subject is 1-100 characters")
+        return v
+
+    @model_validator(mode="after")
+    def _placement_matches_view(self) -> "PhotoRenderRequest":
+        wanted = "back" if self.view == "back" else "front"
+        if self.placement != wanted:
+            raise ValueError(f"view {self.view} shows the {wanted} print; use placement {wanted}")
+        return self
+
+
+@app.post("/photo/render")
+def photo_render(req: PhotoRenderRequest) -> dict:
+    check_scope(req.out_key, {"design_key": req.design_key})
+    fmt = photos.output_format(req.out_key)
+    started = time.perf_counter()
+    with workdir() as tmp:
+        design = _download(req.design_key, tmp / "design")
+        res = photos.render_photo(
+            design,
+            req.design_width_in,
+            req.design_height_in,
+            req.garment,
+            req.view,
+            req.blank_hex,
+            req.underbase_preview,
+            req.preset,
+            fmt,
+            req.xmp_subjects,
+        )
+        get_storage().put_bytes(res.data, req.out_key)
+    c = res.checks
+    return {
+        "key": req.out_key,
+        "width_px": res.width_px,
+        "height_px": res.height_px,
+        "format": res.format,
+        "print_box_px": list(res.print_box_px),
+        "checks": {
+            "passes": c.passes,
+            "failures": c.failures,
+            "background_pure_white": c.background_pure_white,
+            "fill_ratio": c.fill_ratio,
+            "longest_side_px": c.longest_side_px,
+        },
+        # Additive extras: the template's print area, the scale applied to the design (1 = real
+        # size) and whether the white underbase preview was drawn.
+        "print_area_px": list(res.print_area_px),
+        "scale": round(res.scale, 4),
+        "underbase_applied": res.underbase_applied,
+        "bytes": len(res.data),
+        "render_ms": round((time.perf_counter() - started) * 1000),
+    }
+
+
+class PhotoZipItem(BaseModel):
+    key: str = Key
+    name: str = Field(min_length=1, max_length=200)
+
+
+class PhotoZipRequest(BaseModel):
+    items: list[PhotoZipItem] = Field(min_length=1, max_length=500)
+    out_key: str = Key
+
+
+@app.post("/photo/zip")
+def photo_zip(req: PhotoZipRequest) -> dict:
+    check_scope(req.out_key, {f"items[{i}].key": it.key for i, it in enumerate(req.items)})
+    if not req.out_key.lower().endswith(".zip"):
+        raise ImageError("out_key must end in .zip")
+    with workdir() as tmp:
+        files = []
+        for i, it in enumerate(req.items):
+            dest = tmp / f"item-{i}"
+            get_storage().download(it.key, dest)
+            files.append((dest, it.name))
+        out = tmp / "photos.zip"
+        size = photos.build_zip(files, out)
+        get_storage().upload(out, req.out_key)
+    return {"key": req.out_key, "bytes": size}
 
 
 # --- shipping label -----------------------------------------------------------------------
