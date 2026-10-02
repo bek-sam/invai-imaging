@@ -37,6 +37,7 @@ class Storage(Protocol):
     def upload(self, src: Path, key: str, download_filename: str | None = None) -> None: ...
     def put_bytes(self, data: bytes, key: str) -> None: ...
     def exists(self, key: str) -> bool: ...
+    def size(self, key: str) -> int: ...
 
 
 class LocalStorage:
@@ -70,6 +71,12 @@ class LocalStorage:
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def size(self, key: str) -> int:
+        path = self._path(key)
+        if not path.is_file():
+            raise NotFoundError(key)
+        return path.stat().st_size
 
 
 class S3Storage:
@@ -130,6 +137,17 @@ class S3Storage:
             if self._missing(e):
                 return False
             raise
+
+    def size(self, key: str) -> int:
+        from botocore.exceptions import ClientError
+
+        try:
+            resp = self.client.head_object(Bucket=self.bucket, Key=key)
+        except ClientError as e:
+            if self._missing(e):
+                raise NotFoundError(key) from e
+            raise
+        return int(resp["ContentLength"])
 
 
 @lru_cache

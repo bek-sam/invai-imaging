@@ -10,7 +10,7 @@ import pyvips
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
-from app import garments, photos
+from app import garments, main, photos
 from app.config import settings
 from app.guard import HEAVY_PATHS
 from app.main import app
@@ -307,6 +307,49 @@ def test_zip_names_are_sanitised_and_deduplicated(client, design):
     assert all(".." not in n and not n.startswith("/") for n in names)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         assert zf.read("amazon/01-tee.jpg") == (ROOT / k1).read_bytes()
+
+
+def put_raw(key: str, n_bytes: int) -> str:
+    """A file of exactly `n_bytes`, for exercising the zip byte caps without a real 50 MB fixture
+    (S-50): the caps are checked from storage size before any content is read."""
+    path = ROOT / key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.truncate(n_bytes)
+    return key
+
+
+def test_zip_rejects_an_item_over_the_per_item_cap(client, monkeypatch):
+    monkeypatch.setattr(main, "PHOTO_ZIP_MAX_ITEM_BYTES", 1000)
+    big = put_raw(f"{CO}/photos/big.jpg", 1001)
+    r = client.post(
+        "/photo/zip",
+        json={"items": [{"key": big, "name": "big.jpg"}], "out_key": f"{CO}/exports/cap.zip"},
+    )
+    assert r.status_code == 422 and "per-item limit" in r.json()["detail"]
+
+
+def test_zip_rejects_items_over_the_total_cap(client, monkeypatch):
+    monkeypatch.setattr(main, "PHOTO_ZIP_MAX_TOTAL_BYTES", 1500)
+    a = put_raw(f"{CO}/photos/a.jpg", 1000)
+    b = put_raw(f"{CO}/photos/b.jpg", 1000)
+    r = client.post(
+        "/photo/zip",
+        json={
+            "items": [{"key": a, "name": "a.jpg"}, {"key": b, "name": "b.jpg"}],
+            "out_key": f"{CO}/exports/total.zip",
+        },
+    )
+    assert r.status_code == 422 and "total limit" in r.json()["detail"]
+
+
+def test_zip_rejects_a_disallowed_extension(client):
+    csv_key = put_raw(f"{CO}/uploads/orders.csv", 10)
+    r = client.post(
+        "/photo/zip",
+        json={"items": [{"key": csv_key, "name": "orders.csv"}], "out_key": f"{CO}/exports/x.zip"},
+    )
+    assert r.status_code == 422 and ".jpg, .jpeg or .png" in r.json()["detail"]
 
 
 # --- safety ---------------------------------------------------------------------------------

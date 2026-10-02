@@ -583,20 +583,48 @@ class PhotoZipRequest(BaseModel):
     out_key: str = Key
 
 
+# Zip budget (S-50): up to 500 items with no cap let one call copy any kind of file in the
+# company prefix (gang-sheet print files, CSV uploads) into imaging's temp disk and fill it,
+# stopping compose, nest and render for every shop. These caps are checked from storage metadata
+# -- before any bytes are downloaded -- and the allowed extensions keep `/photo/zip` to the
+# photo outputs it exists for.
+PHOTO_ZIP_MAX_ITEM_BYTES = 50 * 1024 * 1024  # 50 MB
+PHOTO_ZIP_MAX_TOTAL_BYTES = 1024 * 1024 * 1024  # 1 GB
+PHOTO_ZIP_ALLOWED_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
 @app.post("/photo/zip")
 def photo_zip(req: PhotoZipRequest) -> dict:
     check_scope(req.out_key, {f"items[{i}].key": it.key for i, it in enumerate(req.items)})
     if not req.out_key.lower().endswith(".zip"):
         raise ImageError("out_key must end in .zip")
+    storage = get_storage()
+    total_bytes = 0
+    for i, it in enumerate(req.items):
+        if not it.key.lower().endswith(PHOTO_ZIP_ALLOWED_EXTENSIONS):
+            raise ImageError(f"items[{i}].key must be a .jpg, .jpeg or .png file")
+        item_bytes = storage.size(it.key)
+        if item_bytes > PHOTO_ZIP_MAX_ITEM_BYTES:
+            raise ImageError(
+                f"items[{i}].key is {item_bytes / 1e6:.0f} MB, over the "
+                f"{PHOTO_ZIP_MAX_ITEM_BYTES / 1e6:.0f} MB per-item limit"
+            )
+        total_bytes += item_bytes
+        if total_bytes > PHOTO_ZIP_MAX_TOTAL_BYTES:
+            raise ImageError(
+                f"items total {total_bytes / 1e6:.0f} MB, over the "
+                f"{PHOTO_ZIP_MAX_TOTAL_BYTES / 1e6:.0f} MB total limit"
+            )
     with workdir() as tmp:
         files = []
+        checked = _CheckedStorage(storage)
         for i, it in enumerate(req.items):
             dest = tmp / f"item-{i}"
-            get_storage().download(it.key, dest)
+            checked.download(it.key, dest)
             files.append((dest, it.name))
         out = tmp / "photos.zip"
         size = photos.build_zip(files, out)
-        get_storage().upload(out, req.out_key)
+        storage.upload(out, req.out_key)
     return {"key": req.out_key, "bytes": size}
 
 
