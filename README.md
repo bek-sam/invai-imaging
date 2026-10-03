@@ -32,7 +32,7 @@ request validation errors and missing keys (`file not found: <key>`).
 | `IMAGING_SHARED_SECRET` | `invai-imaging-dev-secret` | Every path but `/health` needs `X-Imaging-Secret: <secret>` (constant-time compare), else `401`. A comma-separated list accepts each entry (rotation). The backend sends its own `IMAGING_SHARED_SECRET`. |
 | `IMAGING_ENV` | `development` (`production` in the Docker image) | `production` refuses to start on the dev secret or one under 32 chars. |
 | `IMAGING_DEV_ENDPOINTS` | `false` | `/labels/mock` and `/sample-art` answer `404` unless `true`. Local dev (`.env.example`) sets it; the backend's mock carrier and the seed need it. |
-| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose`, `/render/personalization`, `/photo/render` and `/photo/zip` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
+| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose`, `/render/personalization`, `/photo/render`, `/photo/zip`, `/photo/scene-base` and `/photo/scene-composite` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
 | `IMAGING_RETRY_AFTER_S` | `5` | The `Retry-After` value. |
 | `IMAGING_MAX_DECODE_PIXELS` | `570000000` | Pixel cap checked from the header before decoding (raster, SVG size, and PDF page size × DPI). |
 | `IMAGING_PHOTO_TEMPLATE_CACHE` | `4` | Listing-photo templates kept drawn per (garment, view, size), about 20–40 MB each at 2000 px. |
@@ -60,6 +60,8 @@ request validation errors and missing keys (`file not found: <key>`).
 | `GET /photo/templates` | | `[{garment, view, placement, print_areas: {front\|back: {w_in, h_in}}, drawn}]` |
 | `POST /photo/render` | `{design_key, design_width_in, design_height_in, placement, garment, view, blank_hex, underbase_preview=false, preset, out_key, xmp_subjects=[]}` | `{key, width_px, height_px, format, print_box_px: [x,y,w,h], checks: {passes, failures, background_pure_white, fill_ratio, longest_side_px}, print_area_px, scale, underbase_applied, bytes, render_ms}` |
 | `POST /photo/zip` | `{items: [{key, name}], out_key}` | `{key, bytes}` |
+| `POST /photo/scene-base` | `{garment, view: on_model_white\|lifestyle_base, blank_hex, size_px=1024 (or [w, h], 256-2048), out_key (.png), mask_out_key (.png)}` | `{key, mask_key, print_box_px: [x,y,w,h], width_px, height_px, protected_box_px, ppi}` |
+| `POST /photo/scene-composite` | `{scene_key, base_key, print_box_px, design_key, design_width_in, design_height_in, placement=front, blank_hex, preset, out_key, xmp_subjects=[], garment?, view?, underbase_preview=false}` | `{key (null when a check fails), checks: {passes, failures, region_unchanged_score, design_lock_score, region_unchanged_min, design_lock_min}, width_px, height_px, format, print_box_px, preset_failures, registration, upscale, upscale_method, underbase_applied, bytes, render_ms}` |
 | `POST /labels/mock` | `{shipment_id, carrier, service, tracking_code, from, to, weight_oz, out_key}` (addresses: `name, city, state, zip`) | `{key}` |
 | `POST /sample-art` | `{text, out_key, width_in, height_in, dpi=300, color_hex="#111111"}` | `{key}` |
 
@@ -144,6 +146,35 @@ request validation errors and missing keys (`file not found: <key>`).
   whose shares sum to 1 over opaque pixels (the tail is folded into the nearest kept color);
   light = luma ≥ 0.75, dark ≤ 0.25; deterministic. Zip: stdlib, names sanitised (no `..`, no
   absolute paths, odd characters → `_`, duplicates get `-2`), images stored, others deflated.
+- **Scene lock (T-27-2, ADR 0023 phase B).** `/photo/scene-base` draws the blank garment
+  (no design) for the image provider: `on_model_white`, or `lifestyle_base` (the same figure at
+  62% of the frame on a neutral 228,226,222 set, leaving room for a scene). The mask follows
+  OpenAI's convention: transparent = editable, opaque = keep; only the print area plus 0.5 in
+  (`protected_box_px`) is opaque. The base PNG carries its `garment/view` in a tEXt chunk, so the
+  composite needs no garment/view. `/photo/scene-composite` treats the scene as untrusted:
+  storage size ≤ 25 MB checked before download, magic bytes PNG/JPEG/WebP only, 256-4096 px a
+  side and the decode pixel cap, else **400** `{detail}`. `print_box_px` must match the base's
+  print area (±1 px) and `amazon_main` is refused (422). Then: (1) registration: the scene is
+  cover-fitted to the base, then scale 0.90-1.10 and shift ≤ 8% are searched coarse to fine by
+  masked normalized cross-correlation of edge maps over the garment and figure; (2) check 1
+  `region_changed`: the scene's edges must sit on the base's garment outline (0.35 in band) in a
+  6.5 in ring around the print box, score relative to the base itself, minimum
+  **0.75** (and the search must not hit its limit); on failure `key` is null and nothing is
+  written; (3) the scene is warped (registration and upscale in one `lbb` resample: locally
+  bounded bicubic, no halos) straight to the preset size and cropped; (4) the blank print area
+  plus 0.5 in is redrawn from the template at output size, lit by the scene (global gain clamped
+  0.5-1.6 with ≤ 15% per-channel tint, local shade 0.6-1.25), and the design printed at real
+  size, displaced by the template folds plus the scene's light read as relief, wave 26
+  underbase rule; (5) check 2 `design_drift`: the printed region is de-shaded and compared with
+  the source design flat on the blank by SSIM (R, G, B mean, coverage-weighted, at 160 px),
+  minimum **0.80**; on failure nothing is written. Thresholds were set from 32 test scenes (tee
+  and hoodie, both views, navy and white): check 1 passes 0.92-1.00 for unchanged, mock-like
+  perturbed (new background, relit, tinted, noise, 2% scale, shift, other provider size, JPEG)
+  and strongly folded scenes; a 10% wider garment scores 0.01-0.15, a 15% shifted frame ≤ 0.33.
+  Check 2: 0.94-1.00 unchanged or perturbed, 0.88-0.90 with ±30% folds over the print; a
+  swapped design 0.36-0.42, the main color changed 0.69-0.71. Preset checks are reported in
+  `preset_failures` (`background_not_white` on white-required presets, `too_small`,
+  `design_larger_than_print_area`) and don't block the write.
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
   shading, the design fitted into the chest box. Opaque PNG on a light gray background.
 - **Mock label.** 4x6in PDF: service box, carrier/service, weight, from/to, Code128 tracking
@@ -188,6 +219,13 @@ thread start, +55 encode). Across all 16 templates RSS climbs to a 570–700 MB 
 (4 cached templates plus allocator high-water; a cache of 1 still plateaus near 455 MB), so a
 photo-set job should count on ~0.7 GB, like a compose. Zip of 48 renders (8.8 MB): 0.01 s.
 
+**T-27-2 scene composite** (same laptop, live on `:8141` with MinIO, `shopify` 2048×2048 JPEG,
+design 10×10 in): scene base 20-75 ms; composite 0.65-0.77 s per call (registration, check 1,
+warp to 2048, restore and print, encode, check 2), across tee `on_model_white` and hoodie
+`lifestyle_base`, light and dark blanks, provider sizes 1024², 1024×1536 and 1536×1024. Peak RSS
+of the server process over those 4 bases + 4 composites + 1 refused: 637 MB (template cache of 4
+included), so count on ~0.7 GB per process, like a photo-set job.
+
 ## Layout
 
 ```
@@ -201,6 +239,7 @@ app/mockups.py     vector t-shirt mockups
 app/garments.py    listing-photo garment templates (4 garments x 4 views, inches)
 app/photos.py      listing photos: composite, presets and checks, XMP, palette, zip
 app/keys.py        company-prefix checks for /photo/* keys
+app/scenes.py      AI lifestyle scenes: base + edit mask, registration, two lock checks
 bench/             photo_bench.py: listing-photo budgets and contact sheet
 app/labels.py      4x6 mock shipping label (reportlab)
 app/sample_art.py  seed artwork
