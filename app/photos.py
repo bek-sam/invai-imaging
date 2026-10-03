@@ -187,15 +187,25 @@ def compose(
         patch = (base * (1 - a) + ink * a).rint().cast("uchar").copy_memory()
         front_rgb = garment.insert(patch, px0, py0)
 
-    # Layer by coverage masks (255 = layer, 0 = below), in 8 bits: exact where a mask is 0 or
-    # 255, and far lighter on memory than a float pipeline over the whole frame.
-    canvas = (pyvips.Image.black(W, H, bands=3) + 255).cast("uchar")
+    out = layer(maps, garment, front_rgb)
+    return out, {"print_box_px": (x, y, dw, dh), "scale": scale, "underbase": underbase}
+
+
+def layer(
+    maps: TemplateMaps,
+    garment: pyvips.Image,
+    front_rgb: pyvips.Image,
+    background: tuple[int, int, int] = (255, 255, 255),
+) -> pyvips.Image:
+    """Background, garment behind the figure, figure, then the front garment. Layered by
+    coverage masks (255 = layer, 0 = below), in 8 bits: exact where a mask is 0 or 255, and far
+    lighter on memory than a float pipeline over the whole frame."""
+    canvas = (pyvips.Image.black(maps.width, maps.height, bands=3) + list(background)).cast("uchar")
     if maps.back is not None:
         canvas = maps.back.ifthenelse(garment, canvas, blend=True)
     if maps.figure is not None and maps.figure_rgb is not None:
         canvas = maps.figure.ifthenelse(maps.figure_rgb, canvas, blend=True)
-    out = maps.front.ifthenelse(front_rgb, canvas, blend=True).copy(interpretation="srgb")
-    return out, {"print_box_px": (x, y, dw, dh), "scale": scale, "underbase": underbase}
+    return maps.front.ifthenelse(front_rgb, canvas, blend=True).copy(interpretation="srgb")
 
 
 def _garment_rgb_patch(maps: TemplateMaps, x: int, y: int, w: int, h: int) -> pyvips.Image:

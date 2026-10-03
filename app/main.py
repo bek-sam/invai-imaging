@@ -13,7 +13,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app import compose, fonts, garments, labels, mockups, nesting, photos, qa, render, sample_art
+from app import (
+    compose,
+    fonts,
+    garments,
+    labels,
+    mockups,
+    nesting,
+    photos,
+    qa,
+    render,
+    sample_art,
+    scenes,
+)
 from app.config import production_config_error, settings
 from app.guard import GuardMiddleware, limiter
 from app.keys import KeyScopeError, check_scope, company_of
@@ -74,6 +86,12 @@ async def not_found(_: Request, exc: NotFoundError):
 
 @app.exception_handler(KeyScopeError)
 async def key_scope_error(_: Request, exc: KeyScopeError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+@app.exception_handler(scenes.SceneInputError)
+async def scene_input_error(_: Request, exc: scenes.SceneInputError):
+    # The provider's scene is untrusted model output: refused as a bad request (card T-27-2).
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
@@ -569,6 +587,150 @@ def photo_render(req: PhotoRenderRequest) -> dict:
         "scale": round(res.scale, 4),
         "underbase_applied": res.underbase_applied,
         "bytes": len(res.data),
+        "render_ms": round((time.perf_counter() - started) * 1000),
+    }
+
+
+# --- AI lifestyle scenes (T-27-2, ADR 0023 phase B) -----------------------------------------
+
+SceneView = Literal["on_model_white", "lifestyle_base"]
+HexColor = Field(pattern=r"^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+class SceneBaseRequest(BaseModel):
+    garment: Garment
+    view: SceneView
+    blank_hex: str = HexColor
+    # One number is a square base; [w, h] another aspect. Match the provider's output size
+    # (GPT Image: 1024, [1536, 1024] or [1024, 1536]) so the scene comes back the same shape.
+    size_px: int | list[int] = 1024
+    out_key: str = Key
+    mask_out_key: str = Key
+
+    @field_validator("size_px")
+    @classmethod
+    def _size(cls, v: int | list[int]) -> int | list[int]:
+        sides = [v] if isinstance(v, int) else v
+        if len(sides) not in (1, 2) or any(not 256 <= s <= 2048 for s in sides):
+            raise ValueError("size_px is one side or [w, h], each 256-2048")
+        return v
+
+    def wh(self) -> tuple[int, int]:
+        v = self.size_px
+        return (v, v) if isinstance(v, int) else (v[0], v[-1])
+
+
+@app.post("/photo/scene-base")
+def photo_scene_base(req: SceneBaseRequest) -> dict:
+    check_scope(req.out_key, {"mask_out_key": req.mask_out_key})
+    for what, key in (("out_key", req.out_key), ("mask_out_key", req.mask_out_key)):
+        if not key.lower().endswith(".png"):
+            raise ImageError(f"{what} must end in .png")
+    if req.out_key == req.mask_out_key:
+        raise ImageError("out_key and mask_out_key must differ")
+    w, h = req.wh()
+    res = scenes.render_base(req.garment, req.view, w, h, req.blank_hex)
+    storage = get_storage()
+    storage.put_bytes(res.png, req.out_key)
+    storage.put_bytes(res.mask_png, req.mask_out_key)
+    return {
+        "key": req.out_key,
+        "mask_key": req.mask_out_key,
+        "print_box_px": list(res.print_box_px),
+        # Additive extras: the base size, the protected (opaque) box in the mask, the template's
+        # pixels per inch at this size.
+        "width_px": res.width_px,
+        "height_px": res.height_px,
+        "protected_box_px": list(res.protected_box_px),
+        "ppi": res.ppi,
+    }
+
+
+class SceneCompositeRequest(BaseModel):
+    scene_key: str = Key
+    base_key: str = Key
+    print_box_px: list[int] = Field(min_length=4, max_length=4)
+    design_key: str = Key
+    design_width_in: float = Field(gt=0, le=60)
+    design_height_in: float = Field(gt=0, le=60)
+    placement: Literal["front"] = "front"
+    blank_hex: str = HexColor
+    preset: PhotoPreset
+    out_key: str = Key
+    xmp_subjects: list[str] = Field(default_factory=list, max_length=20)
+    # Optional: the base records its garment and view; pass them only for a base made elsewhere.
+    garment: Garment | None = None
+    view: SceneView | None = None
+    underbase_preview: bool = False
+
+    @field_validator("xmp_subjects")
+    @classmethod
+    def _subjects(cls, v: list[str]) -> list[str]:
+        return PhotoRenderRequest._subjects(v)
+
+
+# The provider's scene is untrusted model output: checked from storage metadata before any byte
+# is downloaded, then by magic bytes, header size and pixel cap before decode (400 when refused).
+@app.post("/photo/scene-composite")
+def photo_scene_composite(req: SceneCompositeRequest) -> dict:
+    check_scope(
+        req.out_key,
+        {"scene_key": req.scene_key, "base_key": req.base_key, "design_key": req.design_key},
+    )
+    fmt = photos.output_format(req.out_key)
+    storage = get_storage()
+    scene_bytes = storage.size(req.scene_key)
+    if scene_bytes > scenes.SCENE_MAX_BYTES:
+        raise scenes.SceneInputError(
+            f"scene is {scene_bytes / 1e6:.0f} MB, over the "
+            f"{scenes.SCENE_MAX_BYTES / 1e6:.0f} MB limit"
+        )
+    started = time.perf_counter()
+    with workdir() as tmp:
+        scene_path = tmp / "scene"
+        storage.download(req.scene_key, scene_path)
+        if err := declared_type_error(req.scene_key, scene_path):
+            raise scenes.SceneInputError(f"scene: {err}")
+        res = scenes.composite_scene(
+            scene_path,
+            _download(req.base_key, tmp / "base"),
+            tuple(req.print_box_px),
+            _download(req.design_key, tmp / "design"),
+            req.design_width_in,
+            req.design_height_in,
+            req.blank_hex,
+            req.preset,
+            fmt,
+            req.xmp_subjects,
+            underbase_preview=req.underbase_preview,
+            garment=req.garment,
+            view=req.view,
+        )
+        if res.data is not None:
+            storage.put_bytes(res.data, req.out_key)
+    return {
+        # null when a check failed: nothing is written.
+        "key": req.out_key if res.data is not None else None,
+        "checks": {
+            "passes": res.passes,
+            "failures": res.failures,
+            "region_unchanged_score": res.region_unchanged_score,
+            "design_lock_score": res.design_lock_score,
+            # Additive: the thresholds the scores were held to.
+            "region_unchanged_min": scenes.REGION_UNCHANGED_MIN,
+            "design_lock_min": scenes.DESIGN_LOCK_MIN,
+        },
+        # Additive extras.
+        "width_px": res.width_px,
+        "height_px": res.height_px,
+        "format": res.format,
+        "print_box_px": list(res.print_box_px),
+        "preset_failures": res.preset_failures,
+        "registration": res.registration,
+        "upscale": round(res.upscale, 4),
+        "upscale_method": "lbb",
+        "underbase_applied": res.underbase_applied,
+        "bytes": len(res.data) if res.data is not None else 0,
         "render_ms": round((time.perf_counter() - started) * 1000),
     }
 

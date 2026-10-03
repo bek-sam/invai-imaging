@@ -29,6 +29,11 @@ from app.config import settings
 
 GARMENTS = ("tee", "hoodie", "crewneck", "tank")
 VIEWS = ("front_flat", "folded", "back", "on_model_white")
+# Scene bases for AI lifestyle images (T-27-2). `lifestyle_base` is the on-model figure drawn
+# smaller (LIFESTYLE_FILL), leaving room around it for the provider to draw a scene. Not in
+# VIEWS: it is a base for /photo/scene-base, not a listing template.
+SCENE_VIEWS = ("on_model_white", "lifestyle_base")
+LIFESTYLE_FILL = 0.62
 SS = 2  # supersampling
 FILL = 0.90  # the product's longest side spans this share of the frame (5% margin each side)
 
@@ -312,21 +317,32 @@ class Template:
     print_area: Box
     drawn: bool = True
     crop_bottom: float | None = None  # on-model: the frame's bottom edge cuts the legs here
+    fill: float = FILL  # share of the frame the product spans on its limiting side
     extra: dict = field(default_factory=dict, compare=False, hash=False)
 
     @property
     def spec(self) -> GarmentSpec:
         return SPECS[self.garment]
 
+    @property
+    def on_model(self) -> bool:
+        return self.view in SCENE_VIEWS
+
 
 def get_template(garment: str, view: str) -> Template:
-    if garment not in SPECS or view not in VIEWS:
+    if garment not in SPECS or (view not in VIEWS and view not in SCENE_VIEWS):
         raise KeyError(f"no template for {garment}/{view}")
     spec = SPECS[garment]
     placement = "back" if view == "back" else "front"
     area = spec.back_area if placement == "back" else spec.front_area
+    on_model = view in SCENE_VIEWS
     return Template(
-        garment, view, placement, area, crop_bottom=34.0 if view == "on_model_white" else None
+        garment,
+        view,
+        placement,
+        area,
+        crop_bottom=34.0 if on_model else None,
+        fill=LIFESTYLE_FILL if view == "lifestyle_base" else FILL,
     )
 
 
@@ -585,7 +601,7 @@ def _draw_figure(c: Canvas, t: Template) -> None:
 
 
 def _draw(c: Canvas, t: Template) -> None:
-    on_model = t.view == "on_model_white"
+    on_model = t.on_model
     if on_model:
         _draw_figure(c, t)
     if t.view == "folded":
@@ -614,7 +630,7 @@ def product_bbox_in(garment: str, view: str) -> tuple[float, float, float, float
     """(left, top, right, bottom) in garment inches, from a coarse draw."""
     t = get_template(garment, view)
     ppi, x0, y0, w, h = 8.0, -30.0, -15.0, 480, 480
-    c = Canvas(w, h, ppi, x0, y0, figure=t.view == "on_model_white")
+    c = Canvas(w, h, ppi, x0, y0, figure=t.on_model)
     _draw(c, t)
     mask = ImageChops.lighter(c.back, c.front) if c.back is not None else c.front
     if c.figure is not None:
@@ -632,12 +648,13 @@ def frame_for(t: Template, w: int, h: int) -> tuple[float, float, float]:
     (on-model: the bottom edge cuts the figure at `crop_bottom`)."""
     left, top, right, bottom = product_bbox_in(t.garment, t.view)
     bw, bh = right - left, bottom - top
+    fill = t.fill
     if t.crop_bottom is not None:
-        ppi = min(FILL * w / bw, (1 - (1 - FILL) / 2) * h / bh)
+        ppi = min(fill * w / bw, (1 - (1 - fill) / 2) * h / bh)
         x0 = (left + right) / 2 - w / (2 * ppi)
         y0 = bottom - h / ppi
         return ppi, x0, y0
-    ppi = min(FILL * w / bw, FILL * h / bh)
+    ppi = min(fill * w / bw, fill * h / bh)
     x0 = (left + right) / 2 - w / (2 * ppi)
     y0 = (top + bottom) / 2 - h / (2 * ppi)
     return ppi, x0, y0
@@ -683,7 +700,7 @@ def template_maps(garment: str, view: str, width: int, height: int) -> TemplateM
     """Draw a template at an output size. Cached: a photo set renders each size many times."""
     t = get_template(garment, view)
     ppi, x0, y0 = frame_for(t, width, height)
-    c = Canvas(width, height, ppi, x0, y0, figure=view == "on_model_white")
+    c = Canvas(width, height, ppi, x0, y0, figure=t.on_model)
     _draw(c, t)
 
     k1 = c.k1
