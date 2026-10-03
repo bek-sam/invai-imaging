@@ -75,10 +75,26 @@ BAND_IN = 0.35  # tolerance band along the garment outline where edges are compa
 # limit. 0.75 leaves 0.17 below the lowest pass and 0.42 above the highest fail.
 REGION_UNCHANGED_MIN = 0.75
 
+# --- check 1b: nothing drawn into the print area ------------------------------------------------
+
+BOX_PX = 256  # longest side of the print area this check runs at (about 0.03-0.05 in per px)
+BOX_BLUR_PX = 1.0  # sensor noise and JPEG blocks blurred away before the gradient
+BOX_LUMA_FLOOR = 8.0  # keeps log contrast finite on near-black fabric
+BOX_EDGE_MIN = 0.10  # log-luminance step per px that counts as a drawn edge
+# Measured (7 garment/view/blank cases incl. black and red, JPEG q85): unchanged, mock-like
+# perturbed, provider-size and +-15%/+-30% fold scenes score 0.000 at 0.10; provider art drawn
+# into the box with the outline intact (the reviewer's disc + bars) 0.068-0.092, a small
+# three-line wordmark in one corner 0.012-0.027. 0.004 (about 260 px of 65k) sits well below
+# the smallest mark and above every clean scene.
+BOX_FOREIGN_MAX = 0.004
+
 # --- composite ------------------------------------------------------------------------------
 
-SHADE_SIGMA_IN = 0.08  # scene light kept down to fold scale; finer detail (text, noise) dropped
-SHADE_RANGE = (0.6, 1.25)  # local light relative to the blank
+# Scene light carried onto the restored blank and the print: low frequency only (broad folds
+# and light), never detail, so nothing the provider drew there can reach the output even below
+# check 1b's threshold (a 0.33 in bar keeps < 10% of its contrast at this blur), and bounded.
+SHADE_SIGMA_IN = 0.4
+SHADE_RANGE = (0.7, 1.2)  # local light relative to the blank
 GAIN_RANGE = (0.5, 1.6)  # global light of the scene's garment relative to the base
 GAIN_TINT = 0.15  # most a channel's gain may differ from the luminance gain (white balance)
 HEIGHT_SIGMA_IN = 0.3  # the scene's light becomes a height map for displacement at this scale
@@ -480,6 +496,37 @@ def outline_check(
     return OutlineCheck(round(score, 4), gain)
 
 
+def print_box_foreign(
+    scene: pyvips.Image, base: pyvips.Image, maps: TemplateMaps, reg: Registration
+) -> float:
+    """Share of the print area where the registered scene has an edge the base's blank doesn't.
+
+    Works on relative contrast (gradient of log luminance), so relighting, tint and smooth
+    folds stay near 0 whatever the blank's color, while marks the provider drew into the box
+    (text, a logo, a disc: sharp steps) stand out. The base's own edges (template seams,
+    drawstrings) are dilated by a few pixels and subtracted, so a sub-pixel registration error
+    on them doesn't count."""
+    wb, hb = base.width, base.height
+    ax, ay, aw, ah = maps.print_area_px
+    r = min(1.0, BOX_PX / max(aw, ah))
+    w, h = round(wb * r), round(hb * r)
+    m, off = reg.scene_to(r, (0.0, 0.0))
+    x0, y0 = round(ax * r), round(ay * r)
+    bw, bh = max(1, round(aw * r)), max(1, round(ah * r))
+
+    def rel_edges(img: pyvips.Image) -> np.ndarray:
+        lum = _luma(img).gaussblur(BOX_BLUR_PX, precision="float") + BOX_LUMA_FLOOR
+        lg = lum.log().crop(x0, y0, bw, bh).numpy().astype(np.float32)
+        gy, gx = np.gradient(lg)
+        return np.hypot(gx, gy)
+
+    es = rel_edges(_warp(scene, m, off, w, h))
+    eb = rel_edges(_warp(base, r, (0, 0), w, h))
+    eb = pyvips.Image.new_from_array(np.ascontiguousarray(eb)).rank(5, 5, 24).numpy()
+    excess = es - eb
+    return round(float((excess > BOX_EDGE_MIN).mean()), 4)
+
+
 # --- check 2 --------------------------------------------------------------------------------
 
 
@@ -638,7 +685,10 @@ def composite_scene(
     underbase = underbase_preview and photos.luma(rgb) < photos.UNDERBASE_LUMA
 
     failures = []
-    if check1.score < REGION_UNCHANGED_MIN or reg.at_limit:
+    # Check 1b: the provider drew nothing into the print area (a mask it ignored, the garment
+    # outline intact): reported as region_changed too, nothing is restored over it.
+    foreign = print_box_foreign(scene, base, maps_b, reg)
+    if check1.score < REGION_UNCHANGED_MIN or reg.at_limit or foreign > BOX_FOREIGN_MAX:
         failures.append("region_changed")
         return SceneResult(
             None, fmt, W, H, box, False, failures, check1.score, None, reg_info, m, underbase

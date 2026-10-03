@@ -8,7 +8,7 @@ import pytest
 import pyvips
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
-from scene_helpers import base_image, folds, moved_garment, perturbed
+from scene_helpers import base_image, drawn_marks, folds, moved_garment, perturbed
 
 from app import main, photos, scenes
 from app.config import settings
@@ -269,6 +269,91 @@ def test_moved_or_reshaped_garment_fails_check_1_and_saves_nothing(client, name,
     )
     assert c["design_lock_score"] is None
     assert body["key"] is None and not (ROOT / out_key).exists()
+
+
+# --- composite: check 1b (something drawn into the print box) -------------------------------
+
+
+@pytest.mark.parametrize(
+    "garment,view,blank,kind",
+    [
+        ("tee", "on_model_white", NAVY, "logo"),
+        ("tee", "on_model_white", WHITE, "logo"),
+        ("hoodie", "lifestyle_base", NAVY, "logo"),
+        ("tee", "on_model_white", WHITE, "wordmark"),
+    ],
+)
+def test_provider_art_in_the_print_box_fails_and_saves_nothing(client, garment, view, blank, kind):
+    """The realistic 'mask ignored' case: art inside the print box, the garment outline intact,
+    so check 1 alone passes. Nothing is restored over it and nothing is written."""
+    base = make_base(client, garment, view, blank, name=f"art-{garment}-{blank[1:]}")
+    img = base_image(garment, view, 1024, 1024, blank)
+    ink = (40, 40, 40) if blank == WHITE else (230, 230, 230)
+    sc = drawn_marks(perturbed(img, garment, view, (1024, 1024)), base["print_box_px"], ink, kind)
+    name = f"art-{kind}-{garment}-{blank[1:]}"
+    out_key = f"{CO}/photos/scenes/out/{name}.jpg"
+    body = composite(client, base, put_scene(sc, name, "jpg"), blank_hex=blank, out_key=out_key)
+    body = body.json()
+    c = body["checks"]
+    assert c["region_unchanged_score"] >= scenes.REGION_UNCHANGED_MIN  # the outline is intact
+    assert c["passes"] is False and c["failures"] == ["region_changed"], body
+    assert c["design_lock_score"] is None
+    assert body["key"] is None and not (ROOT / out_key).exists()
+
+
+@pytest.mark.parametrize("blank", [NAVY, WHITE, "#111111", "#C0302A"])
+def test_print_box_check_ignores_light_folds_and_noise(blank):
+    """Relit, tinted, noisy, JPEG'd scenes with strong folds over the print stay at 0; drawn
+    marks are well above the limit on the same blank."""
+    maps = template_maps("tee", "on_model_white", 1024, 1024)
+    img = base_image("tee", "on_model_white", 1024, 1024, blank)
+    p = perturbed(img, "tee", "on_model_white", (1024, 1024))
+
+    def foreign(sc):
+        sc = pyvips.Image.new_from_buffer(sc.jpegsave_buffer(Q=85), "")
+        return scenes.print_box_foreign(sc, img, maps, scenes.register(sc, img, maps))
+
+    for clean in (p, folds(p, maps.print_area_px, 0.15), folds(p, maps.print_area_px, 0.3)):
+        assert foreign(clean) <= scenes.BOX_FOREIGN_MAX
+    ink = (40, 40, 40) if parse_hex(blank)[0] > 128 else (230, 230, 230)
+    mark = drawn_marks(p, maps.print_area_px, ink, "wordmark")
+    assert foreign(mark) > 2 * scenes.BOX_FOREIGN_MAX
+
+
+def test_scene_light_on_the_print_is_low_frequency_and_bounded():
+    """Whatever the scene has in the print box, only broad light reaches the restored blank:
+    text-like bars at full contrast leave a shade field inside SHADE_RANGE with little of
+    their structure."""
+    w = h = 400
+    ppi = 50.0
+    blank = pyvips.Image.black(w, h, bands=3).cast("float") + 128
+    bars = pyvips.Image.black(w, h, bands=3) + 128
+    for i in range(6):
+        bars = bars.draw_rect([80, 80, 80], 40, 40 + i * 50, 320, 16, fill=True)  # 0.32 in bars
+    raw = 1 - 80 / 128  # the bars' own contrast against the blank
+    shade = scenes._shade_field(bars.cast("float"), blank, scenes.SHADE_SIGMA_IN * ppi).numpy()
+    lo, hi = scenes.SHADE_RANGE
+    assert shade.min() >= lo - 1e-6 and shade.max() <= hi + 1e-6
+    for b in (10, 10, 10), (250, 250, 250):  # and any contrast is clamped
+        hard = pyvips.Image.black(w, h, bands=3).cast("float") + b
+        s = scenes._shade_field(hard, blank, scenes.SHADE_SIGMA_IN * ppi).numpy()
+        assert s.min() >= lo - 1e-6 and s.max() <= hi + 1e-6
+    col = shade[90:260, 200]  # across the bars, inside the block: the stripes are gone
+    assert col.max() - col.min() < 0.1 * raw
+
+
+@pytest.mark.parametrize("blank", [NAVY, WHITE])
+def test_marks_drawn_over_the_print_lower_check_2(blank):
+    """Check 2 compares the printed region with the source design: marks over it fail."""
+    out_scene, maps, crop, gain = _scene_frame("tee", "on_model_white", blank)
+    rgb = tuple(parse_hex(blank)[:3])
+    source = ROOT / DESIGN
+    out = scenes._restore_and_print(out_scene, maps, crop, gain, source, 8, 8, rgb, False)
+    assert scenes.lock_check(out, maps, crop, source, 8, 8, rgb, False) >= 0.95
+    x, y, dw, dh, _ = photos._place(maps, 8, 8)
+    for ink in ((40, 40, 40), (230, 230, 230)):
+        marked = drawn_marks(out, (x - crop[0], y - crop[1], dw, dh), ink)
+        assert scenes.lock_check(marked, maps, crop, source, 8, 8, rgb, False) < 0.75
 
 
 # --- check 2 fails --------------------------------------------------------------------------

@@ -102,3 +102,25 @@ def folds(img: pyvips.Image, box: tuple[int, int, int, int], depth: float = 0.15
     factor = 1 + depth * wave * inside
     out = img.cast("float") * factor
     return (out > 255).ifthenelse(255, out).cast("uchar").copy(interpretation="srgb")
+
+
+def drawn_marks(
+    img: pyvips.Image, box: tuple[int, int, int, int], ink, kind: str = "logo"
+) -> pyvips.Image:
+    """The provider ignored the mask and drew into the print box, garment outline intact:
+    `logo` is a disc and four text-like bars (the round 1 review probe), `wordmark` three thin
+    lines in one corner."""
+    x, y, w, h = box
+    ink = list(ink)
+    if kind == "wordmark":
+        for i in range(3):
+            img = img.draw_rect(
+                ink, x + w // 10, y + h // 10 + i * h // 30, w // 4, h // 80, fill=True
+            )
+        return img
+    img = img.draw_circle(ink, x + w // 2, y + h // 2, w // 3, fill=True)
+    for i in range(4):
+        img = img.draw_rect(
+            ink, x + w // 8, y + h // 8 + i * h // 10, w * 3 // 4, h // 24, fill=True
+        )
+    return img

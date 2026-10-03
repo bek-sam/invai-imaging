@@ -160,10 +160,16 @@ request validation errors and missing keys (`file not found: <key>`).
   `region_changed`: the scene's edges must sit on the base's garment outline (0.35 in band) in a
   6.5 in ring around the print box, score relative to the base itself, minimum
   **0.75** (and the search must not hit its limit); on failure `key` is null and nothing is
-  written; (3) the scene is warped (registration and upscale in one `lbb` resample: locally
+  written; (2b) also `region_changed`: nothing may be drawn into the print area (the provider
+  ignored the mask but kept the outline): the share of the box (at 256 px) where the registered
+  scene has a log-luminance edge ≥ 0.10/px that the blank base doesn't must be ≤ **0.004**.
+  Relit, tinted, noisy, JPEG and ±30% folded scenes score 0.000 on navy, white, black and red;
+  a disc with text bars 0.068-0.092, a small three-line wordmark 0.012-0.027; (3) the scene is
+  warped (registration and upscale in one `lbb` resample: locally
   bounded bicubic, no halos) straight to the preset size and cropped; (4) the blank print area
   plus 0.5 in is redrawn from the template at output size, lit by the scene (global gain clamped
-  0.5-1.6 with ≤ 15% per-channel tint, local shade 0.6-1.25), and the design printed at real
+  0.5-1.6 with ≤ 15% per-channel tint, local shade low-frequency only: blurred 0.4 in and
+  clamped 0.7-1.2, so scene detail never reaches the print), and the design printed at real
   size, displaced by the template folds plus the scene's light read as relief, wave 26
   underbase rule; (5) check 2 `design_drift`: the printed region is de-shaded and compared with
   the source design flat on the blank by SSIM (R, G, B mean, coverage-weighted, at 160 px),
@@ -172,7 +178,8 @@ request validation errors and missing keys (`file not found: <key>`).
   perturbed (new background, relit, tinted, noise, 2% scale, shift, other provider size, JPEG)
   and strongly folded scenes; a 10% wider garment scores 0.01-0.15, a 15% shifted frame ≤ 0.33.
   Check 2: 0.94-1.00 unchanged or perturbed, 0.88-0.90 with ±30% folds over the print; a
-  swapped design 0.36-0.42, the main color changed 0.69-0.71. Preset checks are reported in
+  swapped design 0.36-0.42, the main color changed 0.69-0.71 (round 1 numbers), a disc and
+  bars drawn over the print 0.60-0.70. Preset checks are reported in
   `preset_failures` (`background_not_white` on white-required presets, `too_small`,
   `design_larger_than_print_area`) and don't block the write.
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
