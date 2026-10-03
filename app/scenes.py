@@ -54,6 +54,13 @@ SCENE_MIN_SIDE = 256
 SCENE_MAX_SIDE = 4096  # GPT Image answers at most 1536; 4096 leaves room for other providers
 SCENE_MAX_BYTES = 25 * 1024 * 1024
 
+# `base_key` is a stored scene base, normally our own `render_base` output, but a company's own
+# S3 prefix can hold any PNG (S-54): the global decode pixel cap alone still lets a base at
+# ~23000 px a side allocate multi-GB and pin it in the template cache. Held to the same range
+# `/photo/scene-base`'s `size_px` accepts, so a real base always passes.
+BASE_MIN_SIDE = 256
+BASE_MAX_SIDE = 2048
+
 # --- registration ---------------------------------------------------------------------------
 
 REG_COARSE_PX = 256  # longest side of the coarse search
@@ -116,7 +123,8 @@ DESIGN_LOCK_MIN = 0.80
 
 
 class SceneInputError(Exception):
-    """The provider's scene is not an image we accept (format, size, bytes). HTTP 400."""
+    """An untrusted image input to `/photo/scene-composite` - the provider's scene, or the
+    stored base - is not one we accept (format, size, bytes). HTTP 400."""
 
 
 # --- helpers --------------------------------------------------------------------------------
@@ -647,6 +655,16 @@ def composite_scene(
     preset = photos.PRESETS[preset_name]
     scene = load_scene(scene_path)
     base = load(base_path, access="random")
+    # Header-only check (no pixels decoded yet, same pattern as `load_scene`): a base outside
+    # scene-base's own size range would otherwise reach `template_maps` and the decode/flatten
+    # below at whatever size the stored file claims (S-54).
+    if not (BASE_MIN_SIDE <= base.width <= BASE_MAX_SIDE) or not (
+        BASE_MIN_SIDE <= base.height <= BASE_MAX_SIDE
+    ):
+        raise SceneInputError(
+            f"base is {base.width} x {base.height} px; each side must be "
+            f"{BASE_MIN_SIDE}-{BASE_MAX_SIDE} px"
+        )
     base = base.flatten(background=[255, 255, 255]) if base.hasalpha() else base
     base = base[0:3].cast("uchar").copy_memory()
 

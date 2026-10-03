@@ -456,6 +456,36 @@ def test_untrusted_scene_is_refused_with_400(client, monkeypatch):
     assert r.status_code == 400 and "MB" in r.json()["detail"]
 
 
+def _put_base(w: int, h: int, name: str) -> str:
+    """A `base_key`-shaped PNG not made by `render_base` (no scene-base metadata), at an
+    arbitrary size: any PNG a company owns passes `check_scope`, same as a real base (S-54)."""
+    key = f"{CO}/photos/scenes/raw/{name}.png"
+    path = ROOT / key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pyvips.Image.black(w, h, bands=3).pngsave(str(path))
+    return key
+
+
+def test_oversized_or_undersized_base_is_refused_with_400(client):
+    base = make_base(client, "tee", "on_model_white", NAVY, name="basesize")
+    scene = put_scene(pyvips.Image.new_from_file(str(ROOT / base["key"]))[0:3], "basesize")
+
+    # A 9000x9000 base (same shape as the probe that drove the server to 2.6 GB RSS) is refused
+    # from the header alone, before any decode or template draw.
+    huge = {**base, "key": _put_base(9000, 9000, "huge-base")}
+    r = composite(client, huge, scene)
+    assert r.status_code == 400 and r.json()["detail"].startswith("base is 9000 x 9000")
+    assert "2048" in r.json()["detail"]
+
+    tiny = {**base, "key": _put_base(200, 200, "tiny-base")}
+    r = composite(client, tiny, scene)
+    assert r.status_code == 400 and r.json()["detail"].startswith("base is 200 x 200")
+    assert "256" in r.json()["detail"]
+
+    # A normal, render_base-sized base still composites.
+    assert composite(client, base, scene).status_code == 200
+
+
 def test_keys_outside_the_company_are_400(client):
     base = make_base(client, "tee", "on_model_white", NAVY, name="scope")
     scene = put_scene(pyvips.Image.new_from_file(str(ROOT / base["key"]))[0:3], "scope")
