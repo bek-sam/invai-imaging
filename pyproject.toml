@@ -20,6 +20,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "httpx2>=2.13.1",
+    "hypothesis>=6.168.5",
     "moto[s3]>=5.2.3",
     "pypdf>=6.19.0",
     "pytest>=9.1.1",
