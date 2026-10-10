@@ -15,6 +15,10 @@ dependencies = [
   "reportlab>=5.0.1",
   "pypdfium2>=5.13.0",
   "numpy>=2.5.3",
+  "opentelemetry-api==1.44.0",
+  "opentelemetry-sdk==1.44.0",
+  "opentelemetry-exporter-otlp-proto-http==1.44.0",
+  "opentelemetry-instrumentation-fastapi==0.65b0",
 ]
 
 [dependency-groups]

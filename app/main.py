@@ -32,6 +32,7 @@ from app.keys import KeyScopeError, check_scope, company_of
 from app.limits import declared_type_error
 from app.pdf import PDF_MAX_LENGTH_IN
 from app.storage import NotFoundError, S3Storage, Storage, get_storage
+from app.telemetry import setup_tracing
 from app.vips import ImageError, load, save_png, to_srgba, workdir
 
 log = logging.getLogger("invai.imaging")
@@ -56,6 +57,8 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="invai-imaging", lifespan=lifespan)
 # Service auth + heavy-job limit + X-Render-Ms, before any body is read (app/guard.py).
 app.add_middleware(GuardMiddleware)
+# Tracing only when OTEL_EXPORTER_OTLP_ENDPOINT is set (app/telemetry.py, T-32-5).
+setup_tracing(app)
 
 # Storage keys: same shape as the backend's isSafeKey (512 chars max).
 Key = Field(min_length=1, max_length=512)
