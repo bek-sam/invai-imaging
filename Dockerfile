@@ -15,6 +15,8 @@ FROM python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 RUN groupadd --system --gid 10001 imaging && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin imaging
+# pip is not used at runtime; its vendored msgpack, urllib3 and setuptools carry HIGH CVEs (T-31-4).
+RUN python -m pip uninstall -y pip >/dev/null && rm -rf /usr/local/lib/python3.13/site-packages/pip* /usr/local/bin/pip*
 COPY --from=build /app/.venv ./.venv
 COPY app ./app
 # libvips comes from the pyvips[binary] wheel; fonts are bundled in app/fonts.

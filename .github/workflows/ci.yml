@@ -20,3 +20,36 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+
+  # Supply-chain scan (T-31-4): same tools, digests and threshold as `pnpm scan` in invai-infra
+  # (scan/tools.env). Results stay in the job log: nothing is uploaded. Ignores come from
+  # .github/trivyignore.yaml, generated from invai-infra/scan/ignores.json; each has an expiry.
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: invai-imaging
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Secrets (gitleaks, full history)
+        run: docker run --rm -v "$PWD/invai-imaging:/repo:ro" ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f git /repo --redact --no-banner --exit-code 1
+      - name: Dependencies (trivy, HIGH and CRITICAL with a fix)
+        run: |
+          docker run --rm -v "$PWD/invai-imaging:/src:ro" aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa fs /src \
+            --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --include-dev-deps \
+            --ignorefile /src/.github/trivyignore.yaml --exit-code 1
+      - name: Workflows (actionlint, SHA pins, permissions)
+        run: |
+          docker run --rm -v "$PWD/invai-imaging:/repo:ro" -w /repo rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color
+          unpinned="$(grep -rnE '^\s*(-\s+)?uses:' invai-imaging/.github/workflows | grep -vE 'uses:\s+\./' | grep -vE '@[0-9a-f]{40}' || true)"
+          [ -z "$unpinned" ] || { echo "actions not pinned by SHA:"; echo "$unpinned"; exit 1; }
+          missing="$(grep -L '^permissions:' invai-imaging/.github/workflows/*.yml || true)"
+          [ -z "$missing" ] || { echo "no top-level permissions: $missing"; exit 1; }
+      - name: Image (build, then trivy for vulnerabilities and secrets)
+        run: |
+          docker build -t scan-imaging:ci invai-imaging
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/invai-imaging/.github/trivyignore.yaml:/ignore.yaml:ro" aquasec/trivy@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa image scan-imaging:ci \
+            --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --ignorefile /ignore.yaml --exit-code 1
