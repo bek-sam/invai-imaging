@@ -69,19 +69,24 @@ def moved_garment(
     dx_in: float = 0.0,
     dy_in: float = 0.0,
     widen: float = 1.0,
+    scale: float = 1.0,
 ) -> pyvips.Image:
-    """The garment moved (inches) or widened on an unmoved figure and background."""
+    """The garment moved (inches), widened (`widen`, x only) or scaled (`scale`, both axes, about
+    the product's center) on an unmoved figure and background."""
     maps = template_maps(garment, view, w, h)
     rgb = tuple(parse_hex(blank)[:3])
     fabric = photos._garment_rgb(maps, rgb).rint().cast("uchar")
 
     def move(img: pyvips.Image, extend: str) -> pyvips.Image:
-        if widen != 1.0:
+        if widen != 1.0 or scale != 1.0:
             cx = maps.product_bbox_px[0] + maps.product_bbox_px[2] / 2
+            cy = maps.product_bbox_px[1] + maps.product_bbox_px[3] / 2
+            ax = widen * scale
             img = scenes._warp(img, 1.0, (0, 0), w, h).affine(
-                [widen, 0, 0, 1],
+                [ax, 0, 0, scale],
                 oarea=[0, 0, w, h],
-                odx=(1 - widen) * cx,
+                odx=(1 - ax) * cx,
+                ody=(1 - scale) * cy,
                 extend=extend,
             )
         dx, dy = round(dx_in * maps.ppi), round(dy_in * maps.ppi)
@@ -214,13 +219,17 @@ def old_mask_only(
     shift_in: float = 0.0,
     widen: float = 1.0,
     background: pyvips.Image | None = None,
+    dx_in: float = 0.0,
+    scale: float = 1.0,
 ) -> pyvips.Image:
     """A provider that obeyed only the old mask: the print box + 0.5 in rectangle is untouched,
     the garment outside it is re-drawn (moved down `shift_in` on the unmoved figure, or widened)
     over a busy scene (or `background`) in place of the flat background."""
     base = pyvips.Image.new_from_buffer(base_png, "")[0:3]
     w, h = base.width, base.height
-    redrawn = moved_garment(garment, view, w, h, blank, dy_in=shift_in, widen=widen)
+    redrawn = moved_garment(
+        garment, view, w, h, blank, dx_in=dx_in, dy_in=shift_in, widen=widen, scale=scale
+    )
     bg = scenes.LIFESTYLE_BG if view == "lifestyle_base" else (255, 255, 255)
     is_bg = (redrawn == list(bg)).bandand()
     room = busy_scene(w, h) if background is None else background
