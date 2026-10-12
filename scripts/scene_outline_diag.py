@@ -21,8 +21,13 @@ when check 1 passes) and then three numbers that say *why* check 1 scored what i
              transparent area, which fidelity can't see. Also reports `backdrop`, the median luma
              (imaging's scale, 0-1) of the frame outside the keep region grown by 1 in.
 
-Verdicts (thresholds below, fixed from the synthetic distributions *before* real frames were
-scored; `--synthetic` reprints them):
+Verdicts (thresholds below, fixed from the synthetic distributions; `--synthetic` reprints them).
+Fidelity and contrast values were fixed before real frames were scored. THREE spill/backdrop
+values were moved AFTER seeing the real frames, each toward "undecidable": SPILL_MAX_DARK 0.03 ->
+0.50, BACKDROP_APART 0.08 -> 0.15, and "redrawn" now needs spill >= SPILL_REDRAWN 0.25 (it was
+any spill above SPILL_MAX 0.03). On the 6 failing studio frames of wave 38 the original values
+give 3 redrawn (both black-tee frames and white d6ea2019#2), 1 ours low contrast, 2 undecidable;
+the current ones give 0 redrawn, 1 ours low contrast, 5 undecidable (re-run in round 2):
   redrawn             fidelity poor (mad > FID_MAD_BAD or ssim < FID_SSIM_BAD), or the garment
                       spilled into a backdrop that is clearly not the blank's color.
   ours, low contrast  fidelity good, no spill, and the outline edge in the frame is below

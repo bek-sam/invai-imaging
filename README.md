@@ -214,8 +214,14 @@ request validation errors and missing keys (`file not found: <key>`).
   the light gain: mean abs luma difference and SSIM over the kept garment with a luma affine fit
   removed; the figure separately; outline edge strength; share of the 0.35 in outer band that
   looks like the blank; the backdrop's luma). On the 18 real frames the kept garment matches the
-  base in every failing studio frame (mean abs diff 0.7-3.5 levels, SSIM >= 0.96), so none is the
-  garment redrawn; the failures come from the outline: on the white tee the light gray backdrop
+  base in every failing studio frame (mean abs diff 0.7-3.5 levels, SSIM >= 0.96); the script's
+  verdict, though, depends on three spill/backdrop thresholds that were moved after seeing the real
+  frames (SPILL_MAX_DARK 0.03 -> 0.50, BACKDROP_APART 0.08 -> 0.15, redrawn only at spill >= 0.25;
+  all toward "undecidable"). On the 6 failing studio frames the original values call 3 redrawn
+  (both black-tee frames and white d6ea2019#2), 1 ours-low-contrast, 2 undecidable; the current
+  ones call 0 redrawn, 1 ours-low-contrast, 5 undecidable. So no studio frame is called redrawn
+  after the post-hoc change, and garment fidelity is good in 4 of 6 (8153e119#2 and d6ea2019#1
+  sit in the undecidable band, mad 3.3-3.5); the failures are consistent with the outline: on the white tee the light gray backdrop
   (luma 0.76-0.82) sits within 7-25 levels of the drawn outline and its gradient falls to
   4.2-7.2 levels/px (passing frames 14.6-27.7, the base 12.8), and on the black tee the edge is
   there (63-80 vs 90) but displaced 2-4 px or haloed. Only flat_lay 43f8e7f1#1 (registration 0.42,
