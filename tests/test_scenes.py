@@ -581,3 +581,64 @@ def test_design_drift_alone_has_no_region_reasons_and_is_not_structural(client, 
     c = composite(client, base, scene).json()["checks"]
     assert c["failures"] == ["design_drift"]
     assert c["region_reasons"] == [] and c["structural"] is False
+
+
+# --- structural flag (T-37-1, ADR 0036) -------------------------------------------------------
+
+
+def test_is_structural_is_a_function_of_the_registration_score_and_reasons():
+    low, ok = scenes.STRUCTURAL_REG_MAX - 0.01, scenes.STRUCTURAL_REG_MAX + 0.01
+    assert scenes.is_structural(["outline_low", "registration_at_limit"], low) is True
+    assert scenes.is_structural(["outline_low"], low) is True
+    assert scenes.is_structural(["box_foreign"], low) is True
+    assert scenes.is_structural(["outline_low"], ok) is False  # present, displaced
+    assert scenes.is_structural(["registration_at_limit"], ok) is False
+    assert scenes.is_structural(["box_foreign"], ok) is False  # marks drawn: random
+    assert scenes.is_structural([], low) is False  # checks passed (or design_drift alone)
+
+
+def test_unrelated_frame_is_structural(client):
+    base = make_base(client, "tee", "lifestyle_base", WHITE, name="st-far")
+    img = base_image("tee", "lifestyle_base", 1024, 1024, WHITE)
+    far = perturbed(img, "tee", "lifestyle_base", (1024, 1024), shift=(150, 0))
+    body = composite(client, base, put_scene(far, "st-far"), blank_hex=WHITE).json()
+    assert body["registration"]["score"] < scenes.STRUCTURAL_REG_MAX
+    assert body["checks"]["structural"] is True and body["key"] is None
+
+
+@pytest.mark.parametrize("name,kw", [("moved", {"dx_in": 0.6}), ("widened", {"widen": 1.1})])
+def test_displaced_or_widened_garment_is_not_structural(client, name, kw):
+    base = make_base(client, "tee", "on_model_white", WHITE, name=f"st-{name}")
+    sc = moved_garment("tee", "on_model_white", 1024, 1024, WHITE, **kw)
+    body = composite(client, base, put_scene(sc, f"st-{name}"), blank_hex=WHITE).json()
+    assert body["checks"]["failures"] == ["region_changed"]
+    assert body["registration"]["score"] >= scenes.STRUCTURAL_REG_MAX
+    assert body["checks"]["structural"] is False  # a regenerate can land closer
+
+
+def test_art_in_the_print_box_is_not_structural(client):
+    base = make_base(client, "tee", "on_model_white", WHITE, name="st-art")
+    img = base_image("tee", "on_model_white", 1024, 1024, WHITE)
+    sc = drawn_marks(
+        perturbed(img, "tee", "on_model_white", (1024, 1024)), base["print_box_px"], (40, 40, 40)
+    )
+    body = composite(client, base, put_scene(sc, "st-art", "jpg"), blank_hex=WHITE).json()
+    assert body["checks"]["region_reasons"] == ["box_foreign"]
+    assert body["checks"]["structural"] is False
+
+
+def test_altered_print_still_fails_check_2_through_the_composite(client, monkeypatch):
+    """The calibration left check 2 alone: a composite that prints a different design than the
+    one checked fails design_drift, saves nothing, and is not structural."""
+    base = make_base(client, "tee", "on_model_white", WHITE, name="st-drift")
+    scene = put_scene(pyvips.Image.new_from_file(str(ROOT / base["key"]))[0:3], "st-drift")
+    real = scenes._restore_and_print
+    stripes = ROOT / f"{CO}/artwork/2026/10/scene-stripes.png"
+    monkeypatch.setattr(
+        scenes, "_restore_and_print", lambda o, m, c, g, d, *r: real(o, m, c, g, stripes, *r)
+    )
+    out_key = f"{CO}/photos/scenes/out/st-drift.jpg"
+    body = composite(client, base, scene, blank_hex=WHITE, out_key=out_key).json()
+    c = body["checks"]
+    assert c["failures"] == ["design_drift"] and c["design_lock_score"] < scenes.DESIGN_LOCK_MIN
+    assert c["structural"] is False and body["key"] is None and not (ROOT / out_key).exists()

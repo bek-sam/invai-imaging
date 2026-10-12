@@ -20,6 +20,14 @@ only and answers 1024x1024, 1536x1024 or 1024x1536, so nothing about the scene i
    at real size, displaced and shaded by the same light, with the wave 26 underbase rule.
 5. Check 2, `design_drift`: the printed region is de-shaded (smooth achromatic luminance
    normalization) and compared with the source design flat on the blank, by SSIM.
+
+Diagnostics and the structural flag (T-37-1, ADR 0036). A failed check 1/1b reports every
+sub-check that failed in `region_reasons` (`outline_low`, `registration_at_limit`,
+`box_foreign`) and the 1b fraction in `box_foreign`. `structural` is true only when check 1
+failed and the registration score is below STRUCTURAL_REG_MAX: no scale + shift matches the
+base's garment, so a regenerate with the same request can't fix it. It is a function of that
+one call's numbers, so every preset of a frame gets the same value; it is false when the
+checks pass and false for `design_drift` alone.
 """
 
 import math
@@ -81,6 +89,15 @@ BAND_IN = 0.35  # tolerance band along the garment outline where edges are compa
 # garment widened 10% scores 0.01-0.15; a frame shifted 15% scores <= 0.33 and hits the search
 # limit. 0.75 leaves 0.17 below the lowest pass and 0.42 above the highest fail.
 REGION_UNCHANGED_MIN = 0.75
+
+# Structural failure (T-37-1, ADR 0036): registration's best edge correlation, over the whole
+# search range, below this means no scale + shift of the provider's frame puts the base's garment
+# on it. Measured (README "Scene lock"): aligned scenes 0.93-0.94, a garment moved 0.6 in or
+# widened 10% 0.71-0.81 (present, displaced: a regenerate can land closer), a frame shifted 15%
+# 0.30-0.33; the 12 real gpt-image-2 frames (tee, flat_lay/home/studio) 0.12-0.28 on the default
+# search and <= 0.49 on a 6x wider one (scale 0.5-2.0, shift 30%, garment-only weights): the
+# garment is not in the base's pose anywhere. 0.5 sits between 0.28 and 0.71.
+STRUCTURAL_REG_MAX = 0.5
 
 # --- check 1b: nothing drawn into the print area ------------------------------------------------
 
@@ -597,9 +614,13 @@ def region_reasons(score: float, at_limit: bool, foreign: float) -> list[str]:
     return reasons
 
 
-def is_structural(reasons: list[str], score: float, at_limit: bool, foreign: float) -> bool:
-    """True when a regenerate with the same request can't pass check 1 (provisional rule)."""
-    return "registration_at_limit" in reasons
+def is_structural(reasons: list[str], reg_score: float) -> bool:
+    """True when check 1 failed and no similarity transform lines the frame up with the base
+    (STRUCTURAL_REG_MAX): the provider re-drew or re-posed the garment, not nudged it. Decided
+    from this call's registration and check-1/1b numbers only (never the preset, the attempt or
+    earlier calls), so one frame always gets one answer. False when check 1 passed, and for
+    `design_drift` alone (it adds no region reason)."""
+    return bool(reasons) and reg_score < STRUCTURAL_REG_MAX
 
 
 @dataclass
@@ -746,7 +767,7 @@ def composite_scene(
             underbase,
             box_foreign=foreign,
             region_reasons=reasons,
-            structural=is_structural(reasons, check1.score, reg.at_limit, foreign),
+            structural=is_structural(reasons, reg.score),
         )
 
     out_scene = _warp(scene, m, off, W, H).copy_memory()  # read twice: patch and frame

@@ -182,6 +182,22 @@ request validation errors and missing keys (`file not found: <key>`).
   bars drawn over the print 0.60-0.70. Preset checks are reported in
   `preset_failures` (`background_not_white` on white-required presets, `too_small`,
   `design_larger_than_print_area`) and don't block the write.
+- **Scene lock diagnostics and `structural` (T-37-1, ADR 0036).** The `checks` object of
+  `/photo/scene-composite` also carries `region_reasons` (every failed sub-check of check 1, from
+  `outline_low`, `registration_at_limit`, `box_foreign`; empty when it passes), `box_foreign`
+  (the 1b fraction) and `structural`; `registration` stays top level. `structural` is true when
+  check 1 or 1b failed **and** registration's best edge correlation is below **0.5**
+  (`STRUCTURAL_REG_MAX`): no scale + shift of the frame (searched 0.90-1.10, 8%) matches the
+  base's garment, so the provider re-drew or re-posed it and a regenerate with the same request
+  can't pass. It is decided from that one call's numbers only (same frame, same value, any
+  preset), and false when the checks pass, for `design_drift` alone, for a garment present but
+  displaced or widened (registration 0.71-0.81 in tests), and for art drawn into the box on an
+  aligned garment (0.93). Calibration on the owner's 12 real `gpt-image-2` frames (white tee,
+  flat_lay/home/studio; replay with `uv run python scripts/scene_calibrate.py <folder>`): all
+  12 fail check 1 with registration 0.12-0.28, check-1 score <= 0.51 (mostly <= 0), box_foreign
+  <= 0.0006; even a 6x wider search (scale 0.5-2.0, shift 30%, garment-only weights) finds no
+  alignment above 0.49. These are real garment changes, not a strict check: **no threshold was
+  changed**. All 12 are structural. Re-run the replay on new frames before changing the rule.
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
   shading, the design fitted into the chest box. Opaque PNG on a light gray background.
 - **Mock label.** 4x6in PDF: service box, carrier/service, weight, from/to, Code128 tracking
