@@ -261,8 +261,10 @@ def summarize(paths: list[Path]) -> int:
 
 
 def guard_report(real_: list[dict], good: list[dict], bad: list[dict]) -> None:
-    size_t = getattr(scenes, "PLACEMENT_SIZE_MAX_IN", None)
-    shift_t = getattr(scenes, "PLACEMENT_SHIFT_MAX_IN", None)
+    """Per measure: the highest known-good value, the lowest value of each reshaped class, both
+    gaps to the threshold in inches and as a share of it (target >= 25%, ADR 0039), and the
+    known-bad rows that still pass (named by class, with what they are)."""
+    known_good = [r for r in real_ if r["pass_without_guard"] == "yes"] + good
 
     def size(r):
         return max(abs(r["w_in"]), abs(r["h_in"]))
@@ -270,28 +272,59 @@ def guard_report(real_: list[dict], good: list[dict], bad: list[dict]) -> None:
     def shift(r):
         return max(abs(r["x_in"]), abs(r["y_in"]))
 
-    known_good = real_ + good
-    print("\nGUARD measures (inches at the template ppi; size = max(|width|, |height|), "
-          "shift = max(|x|, |y|))")  # fmt: skip
-    for name, fn, thr in (("size", size, size_t), ("shift", shift, shift_t)):
-        gmax = max(known_good, key=fn)
-        print(f"  {name}: known-good max {fn(gmax):.3f} ({gmax['set']} {gmax['case']} {gmax['garment']} {gmax['blank']})"
-              + (f"; threshold {thr}: gap_good {thr - fn(gmax):.3f} = {100 * (thr - fn(gmax)) / thr:.0f}% of threshold" if thr else ""))  # fmt: skip
-        by_case = {}
-        for r in bad:
-            by_case.setdefault(r["case"], []).append(fn(r))
-        print("   class         min      median   max      (bad rows)")
-        for c in BAD:
-            v = sorted(by_case.get(c, []))
-            if v:
-                print(f"   {c:<12} {v[0]:.3f}    {v[len(v) // 2]:.3f}    {v[-1]:.3f}")
-    n_fail = {c: sum(r["pass"] == "NO" for r in bad if r["case"] == c) for c in BAD}
-    n = {c: sum(1 for r in bad if r["case"] == c) for c in BAD}
-    print("\nVERDICT per class (rows failing check 1 incl. guard / rows):")
-    print("  " + "  ".join(f"{c} {n_fail[c]}/{n[c]}" for c in BAD if n[c]))
+    reshaped = [c for c in BAD if c.startswith(("narrow", "widen"))]
+    moved = [c for c in BAD if not c.startswith(("narrow", "widen"))]
     print(
-        f"GOOD set failing check 1 incl. guard: {sum(r['pass'] == 'NO' for r in known_good)} of {len(known_good)}"
+        "\nGUARD (inches at the template ppi; size = max(|width|, |height|), shift = max(|x|, |y|))"
     )
+    for name, fn, thr, classes in (
+        ("size", size, scenes.PLACEMENT_SIZE_MAX_IN, reshaped),
+        ("shift", shift, scenes.PLACEMENT_SHIFT_MAX_IN, moved),
+    ):
+        gmax = max(known_good, key=fn)
+        g_c1 = [r for r in known_good if r["pass_without_guard"] == "yes"]
+        rp = [r for r in real_ if r["pass_without_guard"] == "yes"]
+        print(f"  {name} threshold {thr} in")
+        print(f"    known-good ({len(known_good)} frames) highest {fn(gmax):.3f} "
+              f"({gmax['set']} {gmax['case']} {gmax['garment']} {gmax['blank']}): gap_good "
+              f"{thr - fn(gmax):.3f} in = {100 * (thr - fn(gmax)) / thr:.0f}% of threshold")  # fmt: skip
+        print(f"    of those passing check 1 ({len(g_c1)}) highest {max(map(fn, g_c1), default=0):.3f}; "
+              f"real passes ({len(rp)}) highest {max(map(fn, rp), default=0):.3f}")  # fmt: skip
+        for c in classes:
+            v = sorted(fn(r) for r in bad if r["case"] == c)
+            if not v:
+                continue
+            n_over = sum(x > thr for x in v)
+            n_room = sum(x >= 1.25 * thr for x in v)
+            print(f"    {c:<11} min {v[0]:.3f} median {v[len(v) // 2]:.3f}: gap_bad(min) "
+                  f"{v[0] - thr:+.3f} in = {100 * (v[0] - thr) / thr:+.0f}%; over threshold "
+                  f"{n_over}/{len(v)}, with 25% room {n_room}/{len(v)}")  # fmt: skip
+    print("\nVERDICT, known-bad rows failing check 1 (without guard -> with guard), by class:")
+    tot0 = tot1 = 0
+    for c in BAD:
+        sel = [r for r in bad if r["case"] == c]
+        if not sel:
+            continue
+        f0 = sum(r["pass_without_guard"] == "NO" for r in sel)
+        f1 = sum(r["pass"] == "NO" for r in sel)
+        tot0, tot1 = tot0 + f0, tot1 + f1
+        print(f"  {c:<12} {f0:>3} -> {f1:>3} of {len(sel)}")
+    n = len(bad)
+    print(
+        f"  all rows     {tot0:>3} -> {tot1:>3} of {n}; passing check 1: {n - tot0} -> {n - tot1}"
+    )
+    passing = [r for r in bad if r["pass"] == "yes"]
+    by_class = {}
+    for r in passing:
+        by_class[r["case"]] = by_class.get(r["case"], 0) + 1
+    print("  still passing (rigid move or scale of the garment alone: registration absorbs it, "
+          "the print follows the garment): " + ", ".join(f"{k} {v}" for k, v in by_class.items()))  # fmt: skip
+    gf = [r for r in known_good if r["pass"] == "NO"]
+    gf0 = [r for r in known_good if r["pass_without_guard"] == "NO"]
+    print(f"KNOWN-GOOD frames failing check 1: {len(gf0)} -> {len(gf)} of {len(known_good)} "
+          f"(new failures caused by the guard: {len(gf) - len(gf0)})")  # fmt: skip
+    print(f"REAL frames passing check 1: {sum(r['pass_without_guard'] == 'yes' for r in real_)} -> "
+          f"{sum(r['pass'] == 'yes' for r in real_)} of {len(real_)}")  # fmt: skip
 
 
 def main() -> int:

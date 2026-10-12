@@ -545,13 +545,14 @@ def test_far_shifted_garment_reports_outline_and_registration_limit(client):
     assert body["registration"]["at_limit"] is True
 
 
-def test_widened_garment_reports_outline_low_only(client):
+def test_widened_garment_reports_outline_low_and_placement_off(client):
     base = make_base(client, "tee", "on_model_white", WHITE, name="diag-wide")
     wide = moved_garment("tee", "on_model_white", 1024, 1024, WHITE, widen=1.1)
     body = composite(client, base, put_scene(wide, "diag-wide"), blank_hex=WHITE).json()
     c = body["checks"]
     assert c["passes"] is False
-    assert c["region_reasons"] == ["outline_low"], body
+    # T-40-2: the garment outline is 2 in wider on the sides, which check 1c reports as well
+    assert c["region_reasons"] == ["outline_low", "placement_off"], body
     assert body["registration"]["at_limit"] is False
 
 

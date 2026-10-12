@@ -30,6 +30,12 @@ failed and the registration score is below STRUCTURAL_REG_MAX: no scale + shift 
 base's garment, so a regenerate with the same request can't fix it. It is a function of that
 one call's numbers, so every preset of a frame gets the same value; it is false when the
 checks pass and false for `design_drift` alone.
+
+Check 1c, garment size and place (T-40-2, ADR 0039). After registration the garment's outline in
+the scene is compared with the base's side by side (left, right, top, bottom): a width or height
+off by more than PLACEMENT_SIZE_MAX_IN, or a residual offset over PLACEMENT_SHIFT_MAX_IN, adds
+`placement_off` to `region_reasons` and fails `region_changed`. A rigid move or scale of the
+whole garment is not a failure: registration absorbs it and the print follows the garment.
 """
 
 import math
@@ -94,11 +100,15 @@ EDGE_KNEE = 6.0  # gradient (levels/px) at which an edge counts half
 RING_IN = 6.5  # ring around the print box: reaches the collar and side seams on every garment
 CHECK1_PX = 1536  # longest side check 1 runs at
 BAND_IN = 0.35  # tolerance band along the garment outline where edges are compared
-# Measured (README "Scene lock", 32 scenes: tee and hoodie, on_model_white and lifestyle_base,
-# navy and white): unchanged and mock-like perturbed scenes (new background, relit and tinted,
-# noise, 2% scale, shift, provider size, JPEG) and scenes with strong folds score 0.92-1.00; a
-# garment widened 10% scores 0.01-0.15; a frame shifted 15% scores <= 0.33 and hits the search
-# limit. 0.75 leaves 0.17 below the lowest pass and 0.42 above the highest fail.
+# Measured (README "Scene lock"): in the original 32 scenes (tee and hoodie, on_model_white and
+# lifestyle_base, navy and white) unchanged and mock-like perturbed scenes (new background, relit
+# and tinted, noise, 2% scale, shift, provider size, JPEG) and strong folds scored 0.92-1.00, a
+# garment widened 10% 0.01-0.15, a frame shifted 15% <= 0.33. The T-40-2 sweep (README "Scene
+# lock: margin and the placement guard", 1,824 frames) corrects the margin: the lowest real pass
+# is 0.822, the lowest synthetic pass 0.760, and the highest garment that is narrowed or widened
+# (5/10/15%, widened 10%) is 0.689 (narrowed 10%, sport-gray tee, backdrop 235), so 0.75 leaves
+# only 0.061 above the highest reshaped garment (0.42 was never true) and 0.072 below the lowest
+# real pass. A garment moved or scaled alone is not scored lower at all (up to 1.000): see check 1c.
 REGION_UNCHANGED_MIN = 0.75
 
 # Structural failure (T-37-1, ADR 0036): registration's best edge correlation, over the whole
@@ -109,6 +119,23 @@ REGION_UNCHANGED_MIN = 0.75
 # search and <= 0.49 on a 6x wider one (scale 0.5-2.0, shift 30%, garment-only weights): the
 # garment is not in the base's pose anywhere. 0.5 sits between 0.28 and 0.71.
 STRUCTURAL_REG_MAX = 0.5
+
+# --- check 1c: garment size and place after registration (T-40-2, ADR 0039) -------------------
+
+PLACEMENT_SEARCH_IN = 2.0  # each side's outline is looked for this far either way
+PLACEMENT_OUTLINE_MIN = 0.05  # coverage step per px (after a 1 px blur) that counts as outline
+PLACEMENT_MIN_PX = 50  # outline pixels a side needs before it is measured
+PLACEMENT_EDGE_MIN = 0.2  # mean edge strength (0-1, EDGE_KNEE) the best offset needs to count
+# Measured (scripts/scene_guard_sweep.py, 1,824 frames on lifestyle_base and on_model_white: tee
+# and hoodie, six blanks from white to black, backdrops 105/200/235): 272 known-good frames
+# (obedient, re-rendered, mock-like, whole-frame shift and 0.92-1.08 scale, provider sizes, folds,
+# and the 8 real wave 39 passes) have |width|, |height| <= 0.30 in (0.22 on those that pass check
+# 1, real passes <= 0.13) and |shift| <= 0.08 in (0.03 on those that pass, real <= 0.06). Garments narrowed 10/15% or
+# widened 10% measure 0.76-3.5 in; narrowed 5%, the smallest redraw, 0.36-1.17 in. 0.5 in leaves
+# 40% of itself above the highest good and 52% below the lowest 10% row; 0.15 in of shift leaves
+# 49% above the highest good. Garments moved or scaled alone read as ~0 here (see placement_check).
+PLACEMENT_SIZE_MAX_IN = 0.5
+PLACEMENT_SHIFT_MAX_IN = 0.15
 
 # --- check 1b: nothing drawn into the print area ------------------------------------------------
 
@@ -545,6 +572,96 @@ def outline_check(
     return OutlineCheck(round(score, 4), gain)
 
 
+@dataclass
+class Placement:
+    """Where the registered scene's garment outline sits against the base's, in inches at the
+    template's ppi. `width_in` and `height_in` are the change of the garment's extent (right
+    side minus left side displacement; bottom minus top), positive = bigger. `shift_x_in` and
+    `shift_y_in` are the residual offset of its centre. A side with no outline evidence counts 0."""
+
+    width_in: float = 0.0
+    height_in: float = 0.0
+    shift_x_in: float = 0.0
+    shift_y_in: float = 0.0
+    sides: int = 0  # how many of the four sides had an outline edge to measure
+
+    @property
+    def size_in(self) -> float:
+        return max(abs(self.width_in), abs(self.height_in))
+
+    @property
+    def offset_in(self) -> float:
+        return max(abs(self.shift_x_in), abs(self.shift_y_in))
+
+
+def placement_check(
+    scene: pyvips.Image, base: pyvips.Image, maps: TemplateMaps, reg: Registration
+) -> Placement:
+    """Check 1c: is the registered garment the base's size, in the base's place?
+
+    Registration absorbs a rigid change of the whole frame (shift, scale 0.90-1.10) on purpose,
+    and the print follows the garment through it, so those are fine. What it can't absorb is a
+    garment redrawn narrower, wider or taller, or one that moved against its own frame: the
+    outline then sits off the base's by a different amount on each side. For each side (left,
+    right, top, bottom: the outline pixels of the garment's coverage mask inside the same ring
+    as check 1, split by the direction they face) the scene's edge strength is sampled at the
+    outline displaced along the axis, and the displacement with the most edge is the side's
+    offset (parabolic sub-pixel, +-PLACEMENT_SEARCH_IN). Width = right - left, height = bottom
+    - top, shift = their mean. A side whose best edge is weaker than PLACEMENT_EDGE_MIN has no
+    outline in the scene to measure and counts 0 (check 1 reports that case)."""
+    wb, hb = base.width, base.height
+    r = min(1.0, CHECK1_PX / max(wb, hb))
+    w, h = round(wb * r), round(hb * r)
+    m, off = reg.scene_to(r, (0.0, 0.0))
+    es = _edges(_warp(scene, m, off, w, h), 1.0, 1.5)
+    cov = _warp(maps.front.cast("float"), r, (0, 0), w, h).gaussblur(1.0, precision="float")
+    gy, gx = np.gradient(cov.numpy() / 255)
+    mag = np.hypot(gx, gy)
+
+    ppi = maps.ppi * r
+    x, y, bw, bh = (v * r for v in maps.print_area_px)
+    ring, inner = RING_IN * ppi, MASK_MARGIN_IN * ppi
+    yy, xx = np.mgrid[0:h, 0:w]
+
+    def inside(g):
+        return (xx >= x - g) & (xx < x + bw + g) & (yy >= y - g) & (yy < y + bh + g)
+
+    outline = inside(ring) & ~inside(inner) & (mag > PLACEMENT_OUTLINE_MIN)
+    nx, ny = -gx / np.maximum(mag, 1e-9), -gy / np.maximum(mag, 1e-9)  # facing out of the garment
+    rad = max(1, round(PLACEMENT_SEARCH_IN * ppi))
+
+    def offset(facing: np.ndarray, axis: int) -> float | None:
+        ys, xs = np.nonzero(outline & (facing > 0.5))
+        if len(ys) < PLACEMENT_MIN_PX:
+            return None
+        wt = mag[ys, xs]
+        curve = np.empty(2 * rad + 1)
+        for i, d in enumerate(range(-rad, rad + 1)):
+            if axis == 1:
+                v = es[ys, np.clip(xs + d, 0, w - 1)]
+            else:
+                v = es[np.clip(ys + d, 0, h - 1), xs]
+            curve[i] = float((v * wt).sum() / wt.sum())
+        i = int(np.argmax(curve))
+        if curve[i] < PLACEMENT_EDGE_MIN:
+            return None
+        frac = 0.0
+        if 0 < i < len(curve) - 1:
+            a, b, c = curve[i - 1], curve[i], curve[i + 1]
+            d2 = a - 2 * b + c
+            frac = 0.0 if d2 >= 0 else max(-0.5, min(0.5, 0.5 * (a - c) / d2))
+        return (i - rad + frac) / ppi
+
+    left, right = offset(-nx, 1), offset(nx, 1)
+    top, bottom = offset(-ny, 0), offset(ny, 0)
+    out = Placement(sides=sum(v is not None for v in (left, right, top, bottom)))
+    if left is not None and right is not None:
+        out.width_in, out.shift_x_in = right - left, (right + left) / 2
+    if top is not None and bottom is not None:
+        out.height_in, out.shift_y_in = bottom - top, (bottom + top) / 2
+    return out
+
+
 def print_box_foreign(
     scene: pyvips.Image, base: pyvips.Image, maps: TemplateMaps, reg: Registration
 ) -> float:
@@ -626,7 +743,9 @@ def design_lock_score(
 # --- composite ------------------------------------------------------------------------------
 
 
-def region_reasons(score: float, at_limit: bool, foreign: float) -> list[str]:
+def region_reasons(
+    score: float, at_limit: bool, foreign: float, placement: Placement | None = None
+) -> list[str]:
     """Every sub-check of check 1 that failed (empty when check 1 passes), not only the first."""
     reasons = []
     if score < REGION_UNCHANGED_MIN:
@@ -635,6 +754,10 @@ def region_reasons(score: float, at_limit: bool, foreign: float) -> list[str]:
         reasons.append("registration_at_limit")
     if foreign > BOX_FOREIGN_MAX:
         reasons.append("box_foreign")
+    if placement is not None and (
+        placement.size_in > PLACEMENT_SIZE_MAX_IN or placement.offset_in > PLACEMENT_SHIFT_MAX_IN
+    ):
+        reasons.append("placement_off")
     return reasons
 
 
@@ -773,7 +896,8 @@ def composite_scene(
     # Check 1b: the provider drew nothing into the print area (a mask it ignored, the garment
     # outline intact): reported as region_changed too, nothing is restored over it.
     foreign = print_box_foreign(scene, base, maps_b, reg)
-    reasons = region_reasons(check1.score, reg.at_limit, foreign)
+    placement = placement_check(scene, base, maps_b, reg)
+    reasons = region_reasons(check1.score, reg.at_limit, foreign, placement)
     if reasons:
         failures.append("region_changed")
         return SceneResult(
