@@ -186,7 +186,7 @@ request validation errors and missing keys (`file not found: <key>`).
   `design_larger_than_print_area`) and don't block the write.
 - **Scene lock diagnostics and `structural` (T-37-1, ADR 0036).** The `checks` object of
   `/photo/scene-composite` also carries `region_reasons` (every failed sub-check of check 1, from
-  `outline_low`, `registration_at_limit`, `box_foreign`; empty when it passes), `box_foreign`
+  `outline_low`, `registration_at_limit`, `box_foreign`, and since T-40-2 `placement_off`; empty when it passes), `box_foreign`
   (the 1b fraction) and `structural`; `registration` stays top level. `structural` is true when
   check 1 or 1b failed **and** registration's best edge correlation is below **0.5**
   (`STRUCTURAL_REG_MAX`): no scale + shift of the frame (searched 0.90-1.10, 8%) matches the
@@ -254,6 +254,44 @@ request validation errors and missing keys (`file not found: <key>`).
   tone in the prompt, not the check, and no threshold or measure was changed.** The default
   `scene_mask_sim.py` run now exits 0 when every row is expected or within the mask-edge cost of
   the oracle (156 cases with `--frames`).
+- **Check 1 margin and the placement guard, check 1c (T-40-2, ADR 0039).** Measured offline with
+  `scripts/scene_guard_sweep.py` (sets: 8 real wave 39 passes of 12 frames; known-good = obedient,
+  re-rendered, mock-like, whole-frame shift and 0.92-1.08 scale, provider sizes 1024² and
+  1536×1024, folds; known-bad = garment narrowed 5/10/15%, widened 10%, moved 0.3/0.6/1.0 in on
+  each axis both ways, scaled 0.9/1.1; tee and hoodie, six blanks, backdrops 105/200/235; 1,296
+  known-bad and 528 known-good frames over `lifestyle_base` and `on_model_white`). **The margin
+  the old comment gave (0.42) was wrong**: lowest real pass 0.822, lowest synthetic pass 0.760;
+  highest narrowed or widened garment **0.689** (narrowed 10%, sport-gray tee, backdrop 235), gap
+  to 0.75 = **0.061** (8% of the threshold; 0.072 below the lowest real pass). Row counts, check
+  1 alone: 0 of 288 reshaped rows (narrowed, widened) pass; garment-only *moves and scales* pass
+  in 305 of 1,008 (they score up to 1.000): registration absorbs a rigid shift and 0.90-1.10
+  scale on purpose, on `lifestyle_base` the garment is the whole product, and the print follows
+  it, so the output is right (hence not harmful, not detectable by any outline measure after
+  registration). Check 1c measures what registration cannot absorb: after registration, the
+  garment's outline pixels (coverage-mask boundary in the check-1 ring) are split by the side
+  they face; for each side the scene's edge strength is sampled at the outline displaced up to
+  2 in along the axis and the best displacement is that side's offset. Width = right - left, height
+  = bottom - top (positive = bigger), shift = their means, in inches at the template ppi; a side
+  with no edge (best mean edge < 0.2) counts 0. `placement_off` is added when
+  max(|width|, |height|) > **0.5 in** (`PLACEMENT_SIZE_MAX_IN`) or max(|x|, |y|) > **0.15 in**
+  (`PLACEMENT_SHIFT_MAX_IN`). Margins (A6, in inches and as a share of the threshold):
+  | measure | threshold | highest known-good | gap_good | lowest narrowed/widened 10-15% | gap_bad |
+  | --- | --- | --- | --- | --- | --- |
+  | size | 0.5 | 0.299 (real passes 0.132; frames that pass check 1 0.221) | 0.20 = 40% | 0.760 | 0.26 = 52% |
+  | shift | 0.15 | 0.076 (real passes 0.058) | 0.074 = 49% | residual of partly absorbed moves 0.16-0.20 | 0.01-0.05 = 7-34% |
+  Narrowed 5%, the smallest redraw, measures 0.36-1.17 in (`lifestyle_base`: 23 of 36 rows over the
+  threshold, 20 with 25% room); every one of those rows already fails check 1 (c1 <= 0.62) and still does.
+  Result: the guard changes no real-frame verdict (8 of 12 pass before and after; the two real
+  frames it flags, 394d6dc5#2 and 3457ac2a#1, already failed), none of 528 known-good frames, and
+  turns 4 of 305 passing garment-only moves (residual offset 0.16-0.20 in) into failures. **Not
+  detectable, listed instead of tuned:** the other 301 rigid move and scale rows
+  (`move-x/y +-0.3/0.6/1.0`, `gscale0.9/1.1`; 147 on `lifestyle_base`, 154 on `on_model_white`
+  where the garment moves against a still figure and registration still takes it). Cost:
+  `placement_check` is ~46 ms of a ~0.8 s composite at 1024²; peak RSS unchanged (about 540 MB in the
+  test process, no new full-size array). `is_structural` is unchanged (`reasons` and registration
+  < 0.5): a placement-only failure with a good registration is retried. Replay on new frames:
+  `scripts/scene_guard_sweep.py --real <folders> --out f.tsv`, then `--summarize f.tsv ...`.
+
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
   shading, the design fitted into the chest box. Opaque PNG on a light gray background.
 - **Mock label.** 4x6in PDF: service box, carrier/service, weight, from/to, Code128 tracking
@@ -299,7 +337,7 @@ thread start, +55 encode). Across all 16 templates RSS climbs to a 570–700 MB 
 photo-set job should count on ~0.7 GB, like a compose. Zip of 48 renders (8.8 MB): 0.01 s.
 
 **T-27-2 scene composite** (same laptop, live on `:8141` with MinIO, `shopify` 2048×2048 JPEG,
-design 10×10 in): scene base 20-75 ms; composite 0.65-0.77 s per call (registration, check 1,
+design 10×10 in): scene base 20-75 ms; composite 0.65-0.77 s per call (+~46 ms for check 1c in T-40-2: registration, check 1,
 warp to 2048, restore and print, encode, check 2), across tee `on_model_white` and hoodie
 `lifestyle_base`, light and dark blanks, provider sizes 1024², 1024×1536 and 1536×1024. Peak RSS
 of the server process over those 4 bases + 4 composites + 1 refused: 637 MB (template cache of 4
