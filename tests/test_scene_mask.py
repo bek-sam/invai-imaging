@@ -59,7 +59,7 @@ def test_mask_keeps_garment_and_figure_and_frees_the_background(garment, view, s
     assert cover.any()
     assert (alpha[cover] == 255).all(), "every garment/figure pixel is kept"
 
-    r = max(1, round(scenes.MASK_SILHOUETTE_MARGIN_IN * maps.ppi))
+    r = round(scenes.MASK_SILHOUETTE_MARGIN_IN * maps.ppi)
     assert (alpha[dilate(cover, r)] == 255).all(), "the rim is kept"
 
     px, py, pw, ph = res.protected_box_px
@@ -74,13 +74,30 @@ def test_mask_keeps_garment_and_figure_and_frees_the_background(garment, view, s
     assert not (alpha[~dilate(cover, r + 1) & ~box] == 255).any()
 
 
-def test_rim_is_inside_half_the_outline_band_and_one_pixel_at_1024():
+def test_rim_default_is_none_and_stays_inside_half_the_outline_band():
     assert scenes.MASK_SILHOUETTE_MARGIN_IN < scenes.BAND_IN / 2
     assert scenes.MASK_MARGIN_IN == 0.5  # outline_check's ring and the restored patch use it
     for garment in SPECS:
         for view in SCENE_VIEWS:
             ppi = template_maps(garment, view, 1024, 1024).ppi
-            assert round(scenes.MASK_SILHOUETTE_MARGIN_IN * ppi) <= 1
+            assert round(scenes.MASK_SILHOUETTE_MARGIN_IN * ppi) == 0  # rim width in px at 1024
+
+
+@pytest.mark.parametrize("view", SCENE_VIEWS)
+def test_a_wider_rim_is_a_true_disc_to_within_a_pixel(monkeypatch, view):
+    monkeypatch.setattr(scenes, "MASK_SILHOUETTE_MARGIN_IN", 0.2)
+    res = scenes.render_base("hoodie", view, 1024, 1024, WHITE)
+    maps = template_maps("hoodie", view, 1024, 1024)
+    alpha = alpha_of(res)
+    cover = maps.product.numpy() > 0
+    r = round(0.2 * maps.ppi)
+    assert r >= 3
+    px, py, pw, ph = res.protected_box_px
+    box = np.zeros_like(cover)
+    box[py : py + ph, px : px + pw] = True
+    assert (alpha[dilate(cover, r - 1)] == 255).all()
+    assert (alpha[dilate(cover, r)] == 255).all()
+    assert (alpha[~dilate(cover, r + 1) & ~box] == 0).all()
 
 
 @pytest.mark.parametrize("view", SCENE_VIEWS)
@@ -148,18 +165,12 @@ def test_a_provider_that_obeys_the_mask_passes_both_checks(tmp_path, design, gar
     assert r.design_lock_score >= scenes.DESIGN_LOCK_MIN and r.data
 
 
-def test_a_white_garment_passes_in_a_darker_room(tmp_path, design):
-    res = scenes.render_base("tee", "lifestyle_base", S, S, WHITE)
+@pytest.mark.parametrize("view", SCENE_VIEWS)
+def test_a_white_garment_passes_in_a_darker_room(tmp_path, design, view):
+    res = scenes.render_base("tee", view, S, S, WHITE)
     room = busy_scene(S, S, tone=0.5)
-    r = run(
-        tmp_path,
-        design,
-        res,
-        obeys_mask(res.png, res.mask_png, 0.92, room),
-        "tee",
-        "lifestyle_base",
-        WHITE,
-    )
+    scene = obeys_mask(res.png, res.mask_png, 0.92, room)
+    r = run(tmp_path, design, res, scene, "tee", view, WHITE)
     assert r.passes, (r.failures, r.region_reasons, r.region_unchanged_score)
 
 

@@ -150,8 +150,8 @@ request validation errors and missing keys (`file not found: <key>`).
   (no design) for the image provider: `on_model_white`, or `lifestyle_base` (the same figure at
   62% of the frame on a neutral 228,226,222 set, leaving room for a scene). The mask follows
   OpenAI's convention: transparent = editable, opaque = keep; the opaque part is every pixel of
-  the garment and the figure (template coverage > 0, plus a 1 px disc rim, `MASK_SILHOUETTE_MARGIN_IN`
-  0.05 in) and the print area plus 0.5 in (`protected_box_px`), so only the background is editable
+  the garment and the figure (any template coverage > 0, plus a disc rim of
+  `MASK_SILHOUETTE_MARGIN_IN`, 0.0 in by measurement) and the print area plus 0.5 in (`protected_box_px`), so only the background is editable
   (T-38-1; GPT Image treats the mask as guidance only, so the two checks stay the authority). The base PNG carries its `garment/view` in a tEXt chunk, so the
   composite needs no garment/view. `/photo/scene-composite` treats the scene as untrusted:
   storage size ≤ 25 MB checked before download, magic bytes PNG/JPEG/WebP only, 256-4096 px a
@@ -200,6 +200,12 @@ request validation errors and missing keys (`file not found: <key>`).
   <= 0.0006; even a 6x wider search (scale 0.5-2.0, shift 30%, garment-only weights) finds no
   alignment above 0.49. These are real garment changes, not a strict check: **no threshold was
   changed**. All 12 are structural. Re-run the replay on new frames before changing the rule.
+  Offline obedience simulation (T-38-1, `scripts/scene_mask_sim.py`; a provider that keeps every
+  opaque mask pixel and draws a busy scene elsewhere, 144 cases): passes both checks everywhere in
+  a darker room, and fails on a widened garment, a re-drawn garment and art in the print box. In a
+  mid-tone room check 1 itself rejects a white garment on the white studio view even for a
+  pixel-exact soft composite (0.58-0.75 vs 0.75), a background-contrast sensitivity of the check,
+  not of the mask.
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
   shading, the design fitted into the chest box. Opaque PNG on a light gray background.
 - **Mock label.** 4x6in PDF: service box, carrier/service, weight, from/to, Code128 tracking

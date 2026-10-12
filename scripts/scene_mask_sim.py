@@ -118,9 +118,12 @@ def main() -> int:
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--frames", type=Path, default=None)
     ap.add_argument("--work", type=Path, default=None)
+    ap.add_argument("--margin", type=float, default=None, help="override MASK_SILHOUETTE_MARGIN_IN")
     ap.add_argument("--tone", type=float, default=1.0, help="light of the drawn room (0.5 = dark)")
     ap.add_argument("--garments", nargs="*", default=list(SPECS))
     args = ap.parse_args()
+    if args.margin is not None:
+        scenes.MASK_SILHOUETTE_MARGIN_IN = args.margin
     work = args.work or Path(tempfile.mkdtemp(prefix="invai-scene-sim-"))
     work.mkdir(parents=True, exist_ok=True)
     design = work / "design.png"

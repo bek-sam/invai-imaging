@@ -130,7 +130,8 @@ def test_scene_base_and_mask_in_the_provider_convention(client, garment, view, b
     assert (px, py, pw, ph) == (x - m, y - m, bw + 2 * m, bh + 2 * m)
     alpha = mask[3]
     assert alpha.crop(px, py, pw, ph).min() == 255
-    assert alpha.crop(0, 0, w, py).max() == 0 and alpha.crop(0, py + ph, w, h - py - ph).max() == 0
+    # The garment and figure are kept too (tests/test_scene_mask.py); the background corners are not.
+    assert alpha(2, 2) == [0] and alpha(w - 3, h - 3) == [0]
     # The blank is exactly blank_hex on an unshaded garment pixel; no design anywhere.
     assert base(*maps.flat_px)[:3] == list(parse_hex(blank)[:3])
     corner = base(2, 2)[:3]

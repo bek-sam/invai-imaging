@@ -53,12 +53,15 @@ from app.vips import ImageError, load
 # around the print area that is restored from the base before compositing (same value: the
 # restored band is exactly the region the provider was asked to keep).
 MASK_MARGIN_IN = 0.5
-# Rim kept around the garment and figure silhouette in the edit mask (below BAND_IN / 2). Kept
-# pixels abut whatever the provider draws, so the rim puts a hard edge this far outside the real
-# outline, where check 1 looks: measured on an obedient synthetic provider (navy tee, flat new
-# background), check 1 scores 0.97 at 1 px, 0.75 at 2 px and 0.63 at 4 px. 0.05 in is 1 px at the
-# 1024 px frames (the antialiased edge pixels already count as coverage), so the rim stays minimal.
-MASK_SILHOUETTE_MARGIN_IN = 0.05
+# Rim kept around the garment and figure silhouette in the edit mask, on top of every pixel with
+# coverage > 0 (which already includes the antialiased edge). Zero by measurement: kept pixels abut
+# whatever the provider draws, so any rim puts a hard edge outside the real outline, where check 1
+# looks. On an obedient synthetic provider (scripts/scene_mask_sim.py, 144 cases: 4 garments x 2
+# views x white/black blank x several frames) a 1 px rim (0.05 in) fails check 1 on white garments
+# on the white studio view (0.63 vs 1.0), and a navy tee on a flat new background scores 0.97 at
+# 0 or 1 px, 0.75 at 2 px, 0.63 at 4 px. Must stay below BAND_IN / 2 if raised; the dilation (a
+# true disc, in pixels at the base's ppi) is tested at larger values.
+MASK_SILHOUETTE_MARGIN_IN = 0.0
 # Neutral set behind the figure on `lifestyle_base`: the provider replaces it with a scene.
 LIFESTYLE_BG = (228, 226, 222)
 BASE_META_KEY = b"invai:scene-base"
@@ -323,12 +326,14 @@ def _protected_box(maps: TemplateMaps) -> tuple[int, int, int, int]:
 
 def _keep_region(maps: TemplateMaps) -> pyvips.Image:
     """255 over every pixel with product coverage (front, back, figure), dilated by a true disc of
-    MASK_SILHOUETTE_MARGIN_IN, 0 elsewhere."""
-    r = max(1, round(MASK_SILHOUETTE_MARGIN_IN * maps.ppi))
+    MASK_SILHOUETTE_MARGIN_IN (none at 0.0), 0 elsewhere."""
+    r = round(MASK_SILHOUETTE_MARGIN_IN * maps.ppi)
+    cover = (maps.product > 0).ifthenelse(255, 0).cast("uchar")
+    if r <= 0:
+        return cover
     yy, xx = np.mgrid[-r : r + 1, -r : r + 1]
     disc = np.where(xx * xx + yy * yy <= r * r, 255, 128).astype(np.uint8)  # 128 = ignore
     mask = pyvips.Image.new_from_memory(disc.tobytes(), 2 * r + 1, 2 * r + 1, 1, "uchar")
-    cover = (maps.product > 0).ifthenelse(255, 0).cast("uchar")
     return cover.morph(mask, "dilate")
 
 
