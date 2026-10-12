@@ -585,6 +585,23 @@ def design_lock_score(
 # --- composite ------------------------------------------------------------------------------
 
 
+def region_reasons(score: float, at_limit: bool, foreign: float) -> list[str]:
+    """Every sub-check of check 1 that failed (empty when check 1 passes), not only the first."""
+    reasons = []
+    if score < REGION_UNCHANGED_MIN:
+        reasons.append("outline_low")
+    if at_limit:
+        reasons.append("registration_at_limit")
+    if foreign > BOX_FOREIGN_MAX:
+        reasons.append("box_foreign")
+    return reasons
+
+
+def is_structural(reasons: list[str], score: float, at_limit: bool, foreign: float) -> bool:
+    """True when a regenerate with the same request can't pass check 1 (provisional rule)."""
+    return "registration_at_limit" in reasons
+
+
 @dataclass
 class SceneResult:
     data: bytes | None
@@ -600,6 +617,11 @@ class SceneResult:
     upscale: float
     underbase_applied: bool
     preset_failures: list[str] = field(default_factory=list)
+    box_foreign: float | None = None  # check 1b: share of the print area with foreign edges
+    region_reasons: list[str] = field(
+        default_factory=list
+    )  # every sub-check of check 1 that failed
+    structural: bool = False  # a regenerate with the same request can't pass (see STRUCTURAL_*)
 
 
 def _frame(preset: photos.Preset, maps_b: TemplateMaps, garment: str, view: str):
@@ -706,10 +728,25 @@ def composite_scene(
     # Check 1b: the provider drew nothing into the print area (a mask it ignored, the garment
     # outline intact): reported as region_changed too, nothing is restored over it.
     foreign = print_box_foreign(scene, base, maps_b, reg)
-    if check1.score < REGION_UNCHANGED_MIN or reg.at_limit or foreign > BOX_FOREIGN_MAX:
+    reasons = region_reasons(check1.score, reg.at_limit, foreign)
+    if reasons:
         failures.append("region_changed")
         return SceneResult(
-            None, fmt, W, H, box, False, failures, check1.score, None, reg_info, m, underbase
+            None,
+            fmt,
+            W,
+            H,
+            box,
+            False,
+            failures,
+            check1.score,
+            None,
+            reg_info,
+            m,
+            underbase,
+            box_foreign=foreign,
+            region_reasons=reasons,
+            structural=is_structural(reasons, check1.score, reg.at_limit, foreign),
         )
 
     out_scene = _warp(scene, m, off, W, H).copy_memory()  # read twice: patch and frame
@@ -744,6 +781,7 @@ def composite_scene(
         m,
         underbase,
         preset_failures,
+        box_foreign=foreign,
     )
 
 

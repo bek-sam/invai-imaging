@@ -501,3 +501,83 @@ def test_scene_routes_need_the_secret_and_share_the_heavy_limit():
         assert anon.post("/photo/scene-composite", json={}).status_code == 401
     assert {"/photo/scene-base", "/photo/scene-composite"} <= HEAVY_PATHS
     assert main.photo_scene_composite is not None
+
+
+# --- diagnostics (T-37-1): which part of check 1 failed ---------------------------------------
+
+
+def test_region_reasons_names_every_failed_subcheck():
+    ok = scenes.REGION_UNCHANGED_MIN
+    assert scenes.region_reasons(ok, False, 0.0) == []
+    assert scenes.region_reasons(ok - 0.01, False, 0.0) == ["outline_low"]
+    assert scenes.region_reasons(1.0, True, 0.0) == ["registration_at_limit"]
+    assert scenes.region_reasons(1.0, False, scenes.BOX_FOREIGN_MAX + 0.001) == ["box_foreign"]
+    assert scenes.region_reasons(0.1, True, 0.5) == [
+        "outline_low",
+        "registration_at_limit",
+        "box_foreign",
+    ]
+
+
+def test_passing_scene_reports_diagnostics_and_is_not_structural(client):
+    base = make_base(client, "tee", "on_model_white", NAVY, name="diag-ok")
+    img = base_image("tee", "on_model_white", 1024, 1024, NAVY)
+    body = composite(
+        client, base, put_scene(perturbed(img, "tee", "on_model_white", (1024, 1024)), "diag-ok")
+    ).json()
+    c = body["checks"]
+    assert c["passes"] is True, body
+    assert c["region_reasons"] == [] and c["structural"] is False
+    assert c["box_foreign"] == 0.0
+    assert set(body["registration"]) >= {"scale", "dx_px", "dy_px", "score", "at_limit"}
+
+
+def test_far_shifted_garment_reports_outline_and_registration_limit(client):
+    base = make_base(client, "tee", "lifestyle_base", WHITE, name="diag-far")
+    img = base_image("tee", "lifestyle_base", 1024, 1024, WHITE)
+    far = perturbed(img, "tee", "lifestyle_base", (1024, 1024), shift=(150, 0))
+    body = composite(client, base, put_scene(far, "diag-far"), blank_hex=WHITE).json()
+    c = body["checks"]
+    assert c["passes"] is False and c["failures"] == ["region_changed"]
+    assert "outline_low" in c["region_reasons"]
+    assert "registration_at_limit" in c["region_reasons"]
+    assert body["registration"]["at_limit"] is True
+
+
+def test_widened_garment_reports_outline_low_only(client):
+    base = make_base(client, "tee", "on_model_white", WHITE, name="diag-wide")
+    wide = moved_garment("tee", "on_model_white", 1024, 1024, WHITE, widen=1.1)
+    body = composite(client, base, put_scene(wide, "diag-wide"), blank_hex=WHITE).json()
+    c = body["checks"]
+    assert c["passes"] is False
+    assert c["region_reasons"] == ["outline_low"], body
+    assert body["registration"]["at_limit"] is False
+
+
+def test_art_in_the_print_box_reports_box_foreign_only(client):
+    base = make_base(client, "tee", "on_model_white", WHITE, name="diag-box")
+    img = base_image("tee", "on_model_white", 1024, 1024, WHITE)
+    sc = drawn_marks(
+        perturbed(img, "tee", "on_model_white", (1024, 1024)),
+        base["print_box_px"],
+        (40, 40, 40),
+    )
+    body = composite(client, base, put_scene(sc, "diag-box", "jpg"), blank_hex=WHITE).json()
+    c = body["checks"]
+    assert c["region_reasons"] == ["box_foreign"], body
+    assert c["box_foreign"] > scenes.BOX_FOREIGN_MAX
+
+
+def test_design_drift_alone_has_no_region_reasons_and_is_not_structural(client, monkeypatch):
+    base = make_base(client, "tee", "on_model_white", NAVY, name="diag-drift")
+    scene = put_scene(pyvips.Image.new_from_file(str(ROOT / base["key"]))[0:3], "diag-drift")
+    real = scenes._restore_and_print
+    stripes = ROOT / f"{CO}/artwork/2026/10/scene-stripes.png"
+
+    def wrong_design(out_scene, maps, crop, gain, design, *rest):
+        return real(out_scene, maps, crop, gain, stripes, *rest)
+
+    monkeypatch.setattr(scenes, "_restore_and_print", wrong_design)
+    c = composite(client, base, scene).json()["checks"]
+    assert c["failures"] == ["design_drift"]
+    assert c["region_reasons"] == [] and c["structural"] is False

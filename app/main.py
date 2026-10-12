@@ -722,6 +722,11 @@ def photo_scene_composite(req: SceneCompositeRequest) -> dict:
             # Additive: the thresholds the scores were held to.
             "region_unchanged_min": scenes.REGION_UNCHANGED_MIN,
             "design_lock_min": scenes.DESIGN_LOCK_MIN,
+            # Additive (T-37-1): which sub-checks of check 1 failed, the check-1b fraction, and
+            # whether a regenerate with the same request can't fix it.
+            "region_reasons": res.region_reasons,
+            "box_foreign": res.box_foreign,
+            "structural": res.structural,
         },
         # Additive extras.
         "width_px": res.width_px,
