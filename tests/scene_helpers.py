@@ -153,6 +153,14 @@ def busy_scene(
     return (img > 255).ifthenelse(255, (img < 0).ifthenelse(0, img))
 
 
+def flat_backdrop(w: int, h: int, level: float) -> pyvips.Image:
+    """A seamless flat gray backdrop (the studio prompt's "seamless backdrop"), sRGB level 0-255,
+    with a little sensor grain so it isn't a perfectly constant field."""
+    img = pyvips.Image.black(w, h, bands=3) + level
+    img = img + pyvips.Image.gaussnoise(w, h, sigma=1.0, mean=0, seed=19)
+    return (img > 255).ifthenelse(255, (img < 0).ifthenelse(0, img))
+
+
 def keep_from_mask(base_png: bytes, mask_png: bytes) -> tuple[pyvips.Image, pyvips.Image]:
     base = pyvips.Image.new_from_buffer(base_png, "")[0:3]
     keep = pyvips.Image.new_from_buffer(mask_png, "")[3] > 127
@@ -205,16 +213,18 @@ def old_mask_only(
     blank: str,
     shift_in: float = 0.0,
     widen: float = 1.0,
+    background: pyvips.Image | None = None,
 ) -> pyvips.Image:
     """A provider that obeyed only the old mask: the print box + 0.5 in rectangle is untouched,
     the garment outside it is re-drawn (moved down `shift_in` on the unmoved figure, or widened)
-    over a busy scene in place of the flat background."""
+    over a busy scene (or `background`) in place of the flat background."""
     base = pyvips.Image.new_from_buffer(base_png, "")[0:3]
     w, h = base.width, base.height
     redrawn = moved_garment(garment, view, w, h, blank, dy_in=shift_in, widen=widen)
     bg = scenes.LIFESTYLE_BG if view == "lifestyle_base" else (255, 255, 255)
     is_bg = (redrawn == list(bg)).bandand()
-    img = is_bg.ifthenelse(busy_scene(w, h), redrawn.cast("float"))
+    room = busy_scene(w, h) if background is None else background
+    img = is_bg.ifthenelse(room, redrawn.cast("float"))
     x, y, bw, bh = protected_box
     inside = pyvips.Image.black(w, h).draw_rect(255, x, y, bw, bh, fill=True) > 127
     return inside.ifthenelse(base.cast("float"), img).cast("uchar").copy(interpretation="srgb")

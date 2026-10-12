@@ -205,7 +205,49 @@ request validation errors and missing keys (`file not found: <key>`).
   a darker room, and fails on a widened garment, a re-drawn garment and art in the print box. In a
   mid-tone room check 1 itself rejects a white garment on the white studio view even for a
   pixel-exact soft composite (0.58-0.75 vs 0.75), a background-contrast sensitivity of the check,
-  not of the mask.
+  not of the mask. The mask's hard edge costs little of that: an obedient frame scores at most
+  **0.054** below the exact-composite oracle in the same room (0.036 on the white tee, white
+  studio view; often above it), so near the line it can tip a case the oracle barely passes.
+- **Studio scenes and the outline check (T-39-1, offline; check 1 not changed).** Wave 38's paid
+  trial failed `studio` scenes in 3 of 4 (white tee 2 of 2). `scripts/scene_outline_diag.py
+  <trial folders>` re-scores any frames and says why (garment fidelity after registration and
+  the light gain: mean abs luma difference and SSIM over the kept garment with a luma affine fit
+  removed; the figure separately; outline edge strength; share of the 0.35 in outer band that
+  looks like the blank; the backdrop's luma). On the 18 real frames the kept garment matches the
+  base in every failing studio frame (mean abs diff 0.7-3.5 levels, SSIM >= 0.96), so none is the
+  garment redrawn; the failures come from the outline: on the white tee the light gray backdrop
+  (luma 0.76-0.82) sits within 7-25 levels of the drawn outline and its gradient falls to
+  4.2-7.2 levels/px (passing frames 14.6-27.7, the base 12.8), and on the black tee the edge is
+  there (63-80 vs 90) but displaced 2-4 px or haloed. Only flat_lay 43f8e7f1#1 (registration 0.42,
+  at the limit) is a re-posed garment. `scene_mask_sim.py --sweep --bad` (1,716 frames: tee and
+  hoodie, `lifestyle_base`, 11 seamless flat grays x 11 blanks, obedient and re-rendered
+  providers, plus the known-bad frames) reproduces the dip with no redraw: a white tee fails
+  only for a backdrop between sRGB levels 176 and 200 (luma 0.69-0.78; levels 206 and up, and
+  170 and down, pass); the prompt's "light gray" as drawn is about 200. **Backdrop table**
+  (check 1 on a flat gray, worst case over garments, blanks of the band, obedient and
+  re-rendered; luma = level / 255 on `photos.luma`'s scale):
+
+  | blank luma | tested blanks (luma) | best tone (worst-case c1) | every case >= 0.85 | fails (< 0.75) |
+  | --- | --- | --- | --- | --- |
+  | white [0.85, 1.0] | 0.949 | 250 / 0.98 (1.000; 235 and 215 tie) | 215-250 and 10-160 | 190-200 (min 0.389) |
+  | light [0.55, 0.85) | 0.792, 0.722, 0.624 | 215 / 0.84 (0.989) | 190-250 and 10-64 | 128-160 (min 0.466) |
+  | mid [0.22, 0.55) | 0.502, 0.370, 0.292, 0.264 | 215 / 0.84 (0.993) | 160-250 | 32-96 (min 0.613) |
+  | dark [0.10, 0.22) | 0.209, 0.163 | 215 / 0.84 (0.994) | 128-250 | 10-64 (min 0.608) |
+  | black [0, 0.10) | 0.067 | 215 / 0.84 (0.995) | 96-250 | 10-32 (min 0.614) |
+
+  A single backdrop of level 235 (luma 0.92) is inside every band's every-case window. Known-bad
+  frames (widened or narrowed 10%, another garment, garment absent, widened on a backdrop of the
+  blank's own luma) score at most **0.689** on any backdrop (narrowed 10%, sport gray; the
+  hoodie moved 0.6 in down 0.67), so today's gap to 0.75 is **0.061**, not the 0.42 measured in
+  wave 27; the sim's `b-shift` (moved 0.6 in on an unmoved figure) passes check 1 in 98 of 242
+  rows and is not asserted. Real redraws: the 12 wave 37 frames score at most 0.513 and the 6
+  wave 37 trial A frames 0.128. A measure that subtracts the scene's background noise floor was
+  tried offline and lowers the unlucky-backdrop scores instead of raising them (0.648 -> 0.641,
+  0.606, 0.552 at 1, 2 and 3 times the floor), and one that normalizes by the base's outline contrast has nothing to
+  normalize on the white tee (its own outline step is 11.7 levels): **the lever is the backdrop
+  tone in the prompt, not the check, and no threshold or measure was changed.** The default
+  `scene_mask_sim.py` run now exits 0 when every row is expected or within the mask-edge cost of
+  the oracle (156 cases with `--frames`).
 - **Mockup.** A vector-drawn tee (front or back neckline), tinted to `blank_color_hex` with fold
   shading, the design fitted into the chest box. Opaque PNG on a light gray background.
 - **Mock label.** 4x6in PDF: service box, carrier/service, weight, from/to, Code128 tracking
