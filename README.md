@@ -149,8 +149,10 @@ request validation errors and missing keys (`file not found: <key>`).
 - **Scene lock (T-27-2, ADR 0023 phase B).** `/photo/scene-base` draws the blank garment
   (no design) for the image provider: `on_model_white`, or `lifestyle_base` (the same figure at
   62% of the frame on a neutral 228,226,222 set, leaving room for a scene). The mask follows
-  OpenAI's convention: transparent = editable, opaque = keep; only the print area plus 0.5 in
-  (`protected_box_px`) is opaque. The base PNG carries its `garment/view` in a tEXt chunk, so the
+  OpenAI's convention: transparent = editable, opaque = keep; the opaque part is every pixel of
+  the garment and the figure (template coverage > 0, plus a 1 px disc rim, `MASK_SILHOUETTE_MARGIN_IN`
+  0.05 in) and the print area plus 0.5 in (`protected_box_px`), so only the background is editable
+  (T-38-1; GPT Image treats the mask as guidance only, so the two checks stay the authority). The base PNG carries its `garment/view` in a tEXt chunk, so the
   composite needs no garment/view. `/photo/scene-composite` treats the scene as untrusted:
   storage size ≤ 25 MB checked before download, magic bytes PNG/JPEG/WebP only, 256-4096 px a
   side and the decode pixel cap, else **400** `{detail}`. `print_box_px` must match the base's

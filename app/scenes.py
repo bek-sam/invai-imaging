@@ -2,7 +2,9 @@
 
 `/photo/scene-base` draws a blank garment (no design) for the image provider, with an edit mask
 in OpenAI's convention: a PNG with alpha, transparent = the provider may draw, opaque = keep.
-Only the print area plus MASK_MARGIN_IN is protected.
+Everything that is the product (garment, and the figure on a model) dilated by
+MASK_SILHOUETTE_MARGIN_IN, plus the print area with MASK_MARGIN_IN, is kept: the provider draws
+only the background.
 
 `/photo/scene-composite` takes the provider's scene back. GPT Image treats the mask as guidance
 only and answers 1024x1024, 1536x1024 or 1024x1536, so nothing about the scene is trusted:
@@ -51,6 +53,12 @@ from app.vips import ImageError, load
 # around the print area that is restored from the base before compositing (same value: the
 # restored band is exactly the region the provider was asked to keep).
 MASK_MARGIN_IN = 0.5
+# Rim kept around the garment and figure silhouette in the edit mask (below BAND_IN / 2). Kept
+# pixels abut whatever the provider draws, so the rim puts a hard edge this far outside the real
+# outline, where check 1 looks: measured on an obedient synthetic provider (navy tee, flat new
+# background), check 1 scores 0.97 at 1 px, 0.75 at 2 px and 0.63 at 4 px. 0.05 in is 1 px at the
+# 1024 px frames (the antialiased edge pixels already count as coverage), so the rim stays minimal.
+MASK_SILHOUETTE_MARGIN_IN = 0.05
 # Neutral set behind the figure on `lifestyle_base`: the provider replaces it with a scene.
 LIFESTYLE_BG = (228, 226, 222)
 BASE_META_KEY = b"invai:scene-base"
@@ -313,6 +321,17 @@ def _protected_box(maps: TemplateMaps) -> tuple[int, int, int, int]:
     return x0, y0, x1 - x0, y1 - y0
 
 
+def _keep_region(maps: TemplateMaps) -> pyvips.Image:
+    """255 over every pixel with product coverage (front, back, figure), dilated by a true disc of
+    MASK_SILHOUETTE_MARGIN_IN, 0 elsewhere."""
+    r = max(1, round(MASK_SILHOUETTE_MARGIN_IN * maps.ppi))
+    yy, xx = np.mgrid[-r : r + 1, -r : r + 1]
+    disc = np.where(xx * xx + yy * yy <= r * r, 255, 128).astype(np.uint8)  # 128 = ignore
+    mask = pyvips.Image.new_from_memory(disc.tobytes(), 2 * r + 1, 2 * r + 1, 1, "uchar")
+    cover = (maps.product > 0).ifthenelse(255, 0).cast("uchar")
+    return cover.morph(mask, "dilate")
+
+
 def render_base(garment: str, view: str, width: int, height: int, blank_hex: str) -> BaseResult:
     if view not in SCENE_VIEWS:
         raise ImageError(f"view must be one of {', '.join(SCENE_VIEWS)}")
@@ -325,7 +344,7 @@ def render_base(garment: str, view: str, width: int, height: int, blank_hex: str
     png = _png_text(png, BASE_META_KEY, f"{garment}/{view}")
 
     px, py, pw, ph = _protected_box(maps)
-    alpha = pyvips.Image.black(width, height).draw_rect(255, px, py, pw, ph, fill=True)
+    alpha = _keep_region(maps).draw_rect(255, px, py, pw, ph, fill=True)
     mask = pyvips.Image.black(width, height, bands=3).bandjoin(alpha).cast("uchar")
     mask_png = mask.copy(interpretation="srgb").pngsave_buffer(compression=9)
     return BaseResult(
