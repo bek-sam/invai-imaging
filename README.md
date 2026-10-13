@@ -123,13 +123,17 @@ request validation errors and missing keys (`file not found: <key>`).
     line. Its width is the component's median chord: exact on an axis-aligned stroke at native
     resolution, within one analysis pixel after a shrink, about 8% high at worst for an angled
     one. Known gap: a hairline shorter than 0.10 in is ignored; a point sharper than ~17 degrees
-    is flagged. Needs a target size (width or height); without one there is no `thin_line` or
+    is flagged. At most 300 components are measured, **worst first** (T-46-4): ranked by the share
+    of their pixels under 0.02 in, then by bounding-box diagonal, then by label, so any number of
+    0.0267 in lines cannot hide a 0.010 in hairline (verdict and width are the true worst).
+    Needs a target size (width or height); without one there is no `thin_line` or
     `small_text`. Inches per pixel use `effective_dpi`, the same limiting axis as `low_dpi`.
   - `small_text`: warn only. Four or more shapes of similar height (0.4 to 2.5 x the row median),
     each 0.02 to under 0.10 in tall and at most 0.30 in wide, on one line with gaps up to 2.5 x
     their height. Letters that touch are one shape and are not seen (heuristic). Skipped with no
     issue when the art has over 1,000,000 regions or over 5,000 glyph-size shapes (a texture or
-    halftone, not text; `MAX_TEXT_LABELS`, `MAX_TEXT_SHAPES`), so the work stays bounded.
+    halftone, not text; `MAX_TEXT_LABELS`, `MAX_TEXT_SHAPES`), so the work stays bounded; each skip writes one `invai.imaging` INFO line with the count and the
+    cap (no file content).
   - `white_box`: warn when the file has real transparency and at least 95% of the outer ring (the
     larger of 2 px and 1% of the shorter side, on the analysis image) is opaque with R, G and B all
     245 or more. Four regions, one per side. An opaque file is `no_alpha` only.
@@ -356,7 +360,9 @@ extra memory is the analysis image (16M pixels x 4 bands) plus a few uint8 and u
 the same size; it does not grow with the file, because the analysis size is capped. Round 2
 (security S-72/S-73): run lengths in row blocks, per-component boxes and chord medians from
 bounded per-block arrays (no int64 index array over all pixels), at most 300 thin components
-measured, and `small_text` caps above. Re-measured: 22 x 60 in mostly transparent 0.5 s / 608 MB;
+measured (worst first; T-46-4 re-measure: a 22 x 60 in sheet of 33,300 warn lines plus one hairline
+0.8 s / 634 MB before, 0.9 s / 635 MB after, verdict warn -> error; the ranking pass runs only
+above 300 components), and `small_text` caps above. Re-measured: 22 x 60 in mostly transparent 0.5 s / 608 MB;
 22 x 60 in 0.04 in dot grid 1.8 s / 814 MB (no `thin_line`); 22 x 60 in random noise (302 MB PNG)
 2.9 s / 743 MB. Small hostile files at a 40 in target, each ~100 KB: 1 px checkerboard 0.7 s /
 547 MB (was 10 s / 1.9 GB), 2 x 2 px dots on a 3 px pitch 1.5 s / 921 MB (was 39 s / 1.6 GB),

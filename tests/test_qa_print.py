@@ -5,6 +5,7 @@ Strokes are drawn at 300 DPI (a 4 x 4 in design is 1200 px), so a 6 px stroke is
 and a 9 px stroke exactly 0.030 in."""
 
 import json
+import math
 import struct
 import subprocess
 import sys
@@ -568,3 +569,107 @@ def test_qa_check_has_its_own_slot_apart_from_compose(monkeypatch):
         assert client.post("/qa/check", json=body).status_code != 429
     finally:
         limiter.release()
+
+
+# --- T-46-4: the thin-line cap keeps the worst lines first ------------------------------------
+
+
+def _bar(d, cx, cy, length, width, deg, fill=(20, 20, 20, 255)):
+    if deg == 0:  # exact pixel rows and columns
+        x0, y0 = round(cx - length / 2), round(cy - width / 2)
+        d.rectangle((x0, y0, x0 + length - 1, y0 + width - 1), fill=fill)
+        return
+    a = math.radians(deg)
+    ux, uy, vx, vy = math.cos(a), math.sin(a), -math.sin(a), math.cos(a)
+    pts = [
+        (
+            cx + sx * length / 2 * ux + sy * width / 2 * vx,
+            cy + sx * length / 2 * uy + sy * width / 2 * vy,
+        )
+        for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))
+    ]
+    d.polygon(pts, fill=fill)
+
+
+def crowd(n: int, deg: float = 0.0, hairline: bool = True):
+    """10 x 10 in at 300 DPI: `n` warn-level lines (0.0267 in wide, 0.5 in long upright; 0.02 x
+    0.3 in rotated, the boundary of warn) in a grid, then ONE error-level hairline (0.010 in wide) in the next grid cell,
+    so it is the last line found and also shorter than every warn line."""
+    im, d = canvas(3000)
+    if deg == 0:
+        cols, pitch_x, pitch_y, length, wid, hair_len, hair_w = 17, 175, 20, 150, 8, 60, 3
+    else:
+        cols, pitch_x, pitch_y, length, wid, hair_len, hair_w = 33, 90, 60, 90, 5.5, 45, 2
+    for k in range(n + int(hairline)):
+        cx = pitch_x * (k % cols) + pitch_x / 2 + 20
+        cy = pitch_y * (k // cols) + pitch_y / 2 + 20
+        if k < n:
+            _bar(d, cx, cy, length, wid, deg)
+        else:
+            _bar(d, cx, cy, hair_len, hair_w, deg)
+    return im
+
+
+@pytest.mark.parametrize("deg", [0, 30])
+def test_the_crowd_alone_is_only_a_warning(tmp_path, deg):
+    # guards the probe itself: the warn lines really are warn-level, so the hairline decides
+    i = issue(check(save(crowd(1000, deg, hairline=False), tmp_path), 10, 10), "thin_line")
+    assert i is not None and i.severity == "warn"
+
+
+@pytest.mark.parametrize("n", [0, 299, 300, 320, 1000])
+def test_hairline_wins_over_any_number_of_warn_lines(tmp_path, n):
+    i = issue(check(save(crowd(n), tmp_path), 10, 10), "thin_line")
+    assert i is not None and i.severity == "error"
+    assert i.measured_in == pytest.approx(0.010, abs=1 / DPI)
+
+
+@pytest.mark.parametrize("n", [300, 1000])
+def test_rotated_hairline_wins_over_rotated_warn_lines(tmp_path, n):
+    # a rotated bar has tiny chords at its ends, so ranking by the smallest chord would put every
+    # warn line ahead of the hairline; the verdict is the median chord, so rank by its share
+    i = issue(check(save(crowd(n, 30), tmp_path), 10, 10), "thin_line")
+    assert i is not None and i.severity == "error"
+    assert i.measured_in == pytest.approx(0.010, abs=1 / DPI)
+
+
+def test_ties_keep_a_stable_order():
+    # equal share and length: the lower label first, so the same file gives the same report
+    labels = np.array([[1, 2, 3, 4]], dtype=np.uint32)
+    code = np.array([[10, 10, 10, 10]], dtype=np.uint8)
+    keep = np.array([1, 2, 3, 4])
+    diag = np.array([0, 5.0, 5.0, 5.0, 5.0])
+    assert list(qa_print._rank_worst(labels, code, keep, diag, 6.0)) == [1, 2, 3, 4]
+
+
+def test_one_pixel_diagonal_hairline_is_one_8_connected_line(tmp_path):
+    # pixels that touch only at corners are one line; 4-connected labelling sees 1200 specks
+    im, d = canvas(1200)
+    d.line((100, 100, 1000, 1000), fill=(0, 0, 0, 255), width=1)
+    i = issue(check(save(im, tmp_path), 4, 4), "thin_line")
+    assert i is not None and i.severity == "error"
+    assert i.measured_in < qa_print.THIN_LINE_ERROR_IN
+
+
+def test_capped_small_text_is_logged_with_counts(monkeypatch, caplog):
+    m = np.array(glyph_row(12, px(0.06)).getchannel("A")) > 0
+    monkeypatch.setattr(qa_print, "MAX_TEXT_SHAPES", 11)
+    with caplog.at_level("INFO", logger="invai.imaging"):
+        assert qa_print.small_text(m, DPI) is None
+    recs = [r for r in caplog.records if r.name == "invai.imaging"]
+    assert len(recs) == 1
+    assert recs[0].getMessage() == "qa small_text skipped: 12 small shapes, cap 11"
+    caplog.clear()
+    monkeypatch.setattr(qa_print, "MAX_TEXT_SHAPES", 5_000)
+    monkeypatch.setattr(qa_print, "MAX_TEXT_LABELS", 5)
+    with caplog.at_level("INFO", logger="invai.imaging"):
+        assert qa_print.small_text(m, DPI) is None
+    msg = [r.getMessage() for r in caplog.records if r.name == "invai.imaging"]
+    assert len(msg) == 1 and msg[0].endswith(", cap 5") and "regions" in msg[0]
+
+
+def test_small_text_without_a_row_is_not_logged(caplog):
+    m = np.array(glyph_row(2, px(0.06)).getchannel("A")) > 0
+    with caplog.at_level("INFO", logger="invai.imaging"):
+        assert qa_print.small_text(m, DPI) is None
+    assert not [r for r in caplog.records if r.name == "invai.imaging"]

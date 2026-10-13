@@ -22,11 +22,13 @@ stroke.
 Bounded work (security review S-72/S-73). Memory does not depend on the number of shapes: run
 lengths are computed in row blocks, per-component boxes and chord histograms come from libvips
 (`hist_find_indexed`, one value per component), and no per-pixel int64 index array is built. At
-most `MAX_THIN_COMPONENTS` components are measured. `small_text` is skipped (no issue) when the
+most `MAX_THIN_COMPONENTS` components are measured, the worst first: by the share of their pixels under
+the error limit, then by length (`_rank_worst`), so a crowd of warn-level lines cannot hide a hairline. `small_text` is skipped (no issue) when the
 art has more than `MAX_TEXT_LABELS` regions or more than `MAX_TEXT_SHAPES` small shapes: that is a
 texture or a halftone, not text, and its Python row grouping would otherwise grow without bound.
 """
 
+import logging
 import math
 import struct
 
@@ -44,7 +46,7 @@ THIN_RUN_MIN_IN = 0.10  # a thin component shorter than this is a tip or a speck
 MAX_ANALYSIS_PX = 16_000_000
 MAX_ANALYSIS_DPI = 300
 MAX_REGIONS = 20
-MAX_THIN_COMPONENTS = 300  # the longest ones; only the biggest few hundred matter for the report
+MAX_THIN_COMPONENTS = 300  # measured per call; chosen worst first (see _rank_worst)
 MAX_TEXT_LABELS = 1_000_000  # regions (art and holes) in the mask; more is a texture
 MAX_TEXT_SHAPES = 5_000  # small shapes of glyph size; more is a halftone or a pattern
 ALPHA_VISIBLE = 128  # alpha >= this is "ink" at native resolution
@@ -64,6 +66,8 @@ _CHUNK_PX = 1 << 20  # run lengths are computed this many pixels at a time
 # diagonal run of n pixels (n*sqrt 2 long); 0 = not a candidate. Runs are clipped to 100 first.
 _CODE_CLIP = 100
 _CODE_VALUE = np.array([c / 2 if c % 2 == 0 else (c // 2) * _SQRT2 for c in range(256)])
+
+log = logging.getLogger("invai.imaging")
 
 Region = dict[str, float]
 
@@ -253,6 +257,26 @@ def _median_chords(labels: np.ndarray, code: np.ndarray, keep: np.ndarray) -> np
     return (values[lo] + values[hi]) / 2
 
 
+def _rank_worst(
+    labels: np.ndarray, code: np.ndarray, keep: np.ndarray, diag: np.ndarray, error_px: float
+) -> np.ndarray:
+    """`keep` ordered worst first: by the share of a label's candidate pixels whose chord is under
+    `error_px` (the verdict is the label's median chord, and a median is under the limit exactly
+    when most of its pixels are), then by the longest bounding-box diagonal, then by label (stable).
+    O(labels) memory: two bincounts, no per-label Python."""
+    n = int(labels.max()) + 1
+    under_code = _CODE_VALUE < error_px
+    under = np.zeros(n, dtype=np.int64)
+    total = np.zeros(n, dtype=np.int64)
+    for rows, ys, xs, lab in _blocks(code > 0, labels):
+        total += np.bincount(lab, minlength=n)
+        under += np.bincount(lab, weights=under_code[code[rows][ys, xs]], minlength=n).astype(
+            np.int64
+        )
+    share = under[keep] / np.maximum(total[keep], 1)
+    return keep[np.lexsort((keep, -diag[keep], -share))]
+
+
 def _region(x0: float, y0: float, x1: float, y1: float, w: int, h: int) -> Region:
     """Pixel box (inclusive x1, y1) as ratios of the image, clamped to 0..1."""
 
@@ -316,7 +340,8 @@ def thin_lines(mask: np.ndarray, adpi: float) -> tuple[str, float, list[Region]]
     keep = np.flatnonzero((st["count"] > 0) & (diag >= THIN_RUN_MIN_IN * adpi))
     if not keep.size:
         return None
-    keep = keep[np.argsort(-diag[keep], kind="stable")][:MAX_THIN_COMPONENTS]
+    if keep.size > MAX_THIN_COMPONENTS:
+        keep = _rank_worst(labels, code, keep, diag, error_px)[:MAX_THIN_COMPONENTS]
     medians = _median_chords(labels, code, keep)
     widths: list[float] = []
     regions: list[Region] = []
@@ -341,7 +366,9 @@ def small_text(mask: np.ndarray, adpi: float) -> tuple[float, list[Region]] | No
     max_h = SMALL_TEXT_IN * adpi
     max_w = TEXT_MAX_WIDTH_IN * adpi
     min_h = max(2.0, TEXT_MIN_IN * adpi)
-    if _region_bound(mask) > MAX_TEXT_LABELS:
+    bound = _region_bound(mask)
+    if bound > MAX_TEXT_LABELS:
+        log.info("qa small_text skipped: %d regions, cap %d", bound, MAX_TEXT_LABELS)
         return None
     labels = _label(mask)
     st = _stats(labels, mask)
@@ -350,7 +377,10 @@ def small_text(mask: np.ndarray, adpi: float) -> tuple[float, list[Region]] | No
     gw, gh = x1 - x0 + 1, y1 - y0 + 1
     ok = (st["count"] > 0) & (gh >= min_h) & (gh < max_h) & (gw <= max_w)
     shapes = np.flatnonzero(ok)
-    if not TEXT_ROW_MIN <= shapes.size <= MAX_TEXT_SHAPES:
+    if shapes.size > MAX_TEXT_SHAPES:
+        log.info("qa small_text skipped: %d small shapes, cap %d", shapes.size, MAX_TEXT_SHAPES)
+        return None
+    if shapes.size < TEXT_ROW_MIN:
         return None
     cy = (y0[shapes] + y1[shapes]) / 2
     by_y = shapes[np.argsort(cy, kind="stable")]
