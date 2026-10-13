@@ -727,6 +727,10 @@ def photo_scene_composite(req: SceneCompositeRequest) -> dict:
             "region_reasons": res.region_reasons,
             "box_foreign": res.box_foreign,
             "structural": res.structural,
+            # Additive (T-49-5): CIEDE2000 of the restored blank vs the requested colour (null
+            # when nothing could be measured), and warnings that never change `passes`.
+            "blank_delta_e": res.blank_delta_e,
+            "warnings": res.warnings,
         },
         # Additive extras.
         "width_px": res.width_px,

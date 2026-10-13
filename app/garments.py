@@ -101,7 +101,7 @@ class Canvas:
     edges); everything else at 1x: seams and shading are blurred past a pixel anyway, and the
     figure's colors sit under its 2x mask. That keeps the draw's peak memory down."""
 
-    SOFT = ("shadow", "figure_rgb", "highlight", "soft_shadow", "soft_height")
+    SOFT = ("shadow", "figure_rgb", "highlight", "soft_shadow", "soft_height", "strings")
 
     def __init__(self, w: int, h: int, ppi: float, x0: float, y0: float, figure: bool):
         self.w, self.h = w * SS, h * SS
@@ -117,7 +117,11 @@ class Canvas:
         self.highlight = Image.new("L", size1, 0)
         self.soft_shadow = Image.new("L", size1, 255)
         self.soft_height = Image.new("L", size1, 128)
-        names = ("front", "shadow", "figure", "figure_rgb", *self.SOFT)
+        # Hoodie drawstrings (T-49-5): where they are, and the shadow layer as it was just before
+        # they were drawn, so a print can be lit without them (they lie under the print).
+        self.strings = Image.new("L", size1, 0)
+        self.shadow_before_strings: Image.Image | None = None
+        names = ("front", "figure", "figure_rgb", *self.SOFT)
         self.d = {n: ImageDraw.Draw(getattr(self, n)) for n in names if getattr(self, n)}
 
     def _k(self, layer: str | None) -> float:
@@ -483,7 +487,9 @@ def _draw_hoodie_front(c: Canvas, hood_layer: str, opening_shows_figure: bool) -
         c.poly("shadow", opening, 145)
     c.stroke("shadow", opening + opening[:1], 222, 0.7)
     c.stroke("highlight", opening + opening[:1], 30, 0.12)
+    c.shadow_before_strings = c.shadow.copy()
     for s in (1, -1):  # drawstrings and aglets
+        c.stroke("strings", [(1.4 * s, 3.9), (1.5 * s, 11.2)], 255, 0.3)
         c.stroke("shadow", [(1.4 * s, 3.9), (1.5 * s, 11.0)], 178, 0.25)
         c.stroke("highlight", [(1.36 * s, 3.9), (1.46 * s, 11.0)], 40, 0.06)
         c.stroke("shadow", [(1.5 * s, 10.4), (1.52 * s, 11.2)], 110, 0.3)
@@ -678,6 +684,9 @@ class TemplateMaps:
     print_area_px: tuple[int, int, int, int]
     product_bbox_px: tuple[int, int, int, int]
     flat_px: tuple[int, int] | None
+    # The shadow map without the hoodie's drawstrings (None when there are none): a print is lit
+    # with this one, because the strings lie under the print (T-49-5).
+    shadow_no_strings: pyvips.Image | None = None
 
     def to_px(self, x_in: float, y_in: float) -> tuple[float, float]:
         return (x_in - self.origin_in[0]) * self.ppi, (y_in - self.origin_in[1]) * self.ppi
@@ -730,6 +739,17 @@ def template_maps(garment: str, view: str, width: int, height: int) -> TemplateM
     flat = _find_flat(front, shadow_s, highlight_s, print_area_px)
 
     pv = _vips(product)
+    shadow_ns = None
+    if c.shadow_before_strings is not None:
+        reach = c.strings.filter(ImageFilter.MaxFilter(3))
+        shadow_ns = _vips(
+            ImageChops.multiply(
+                Image.composite(c.shadow_before_strings, c.shadow, reach).filter(
+                    ImageFilter.GaussianBlur(0.04 * k1)
+                ),
+                c.soft_shadow.filter(ImageFilter.GaussianBlur(0.35 * k1)),
+            )
+        )
     return TemplateMaps(
         template=t,
         width=width,
@@ -747,6 +767,7 @@ def template_maps(garment: str, view: str, width: int, height: int) -> TemplateM
         print_area_px=print_area_px,
         product_bbox_px=_bbox(pv),
         flat_px=flat,
+        shadow_no_strings=shadow_ns,
     )
 
 

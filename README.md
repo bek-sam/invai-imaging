@@ -62,7 +62,7 @@ request validation errors and missing keys (`file not found: <key>`).
 | `POST /photo/render` | `{design_key, design_width_in, design_height_in, placement, garment, view, blank_hex, underbase_preview=false, preset, out_key, xmp_subjects=[]}` | `{key, width_px, height_px, format, print_box_px: [x,y,w,h], checks: {passes, failures, background_pure_white, fill_ratio, longest_side_px}, print_area_px, scale, underbase_applied, bytes, render_ms}` |
 | `POST /photo/zip` | `{items: [{key, name}], out_key}` | `{key, bytes}` |
 | `POST /photo/scene-base` | `{garment, view: on_model_white\|lifestyle_base, blank_hex, size_px=1024 (or [w, h], 256-2048), out_key (.png), mask_out_key (.png)}` | `{key, mask_key, print_box_px: [x,y,w,h], width_px, height_px, protected_box_px, ppi}` |
-| `POST /photo/scene-composite` | `{scene_key, base_key, print_box_px, design_key, design_width_in, design_height_in, placement=front, blank_hex, preset, out_key, xmp_subjects=[], garment?, view?, underbase_preview=false}` | `{key (null when a check fails), checks: {passes, failures, region_unchanged_score, design_lock_score, region_unchanged_min, design_lock_min}, width_px, height_px, format, print_box_px, preset_failures, registration, upscale, upscale_method, underbase_applied, bytes, render_ms}` |
+| `POST /photo/scene-composite` | `{scene_key, base_key, print_box_px, design_key, design_width_in, design_height_in, placement=front, blank_hex, preset, out_key, xmp_subjects=[], garment?, view?, underbase_preview=false}` | `{key (null when a check fails), checks: {passes, failures, region_unchanged_score, design_lock_score, region_unchanged_min, design_lock_min, region_reasons, box_foreign, structural, blank_delta_e?, warnings?}, width_px, height_px, format, print_box_px, preset_failures, registration, upscale, upscale_method, underbase_applied, bytes, render_ms}` |
 | `POST /labels/mock` | `{shipment_id, carrier, service, tracking_code, from, to, weight_oz, out_key}` (addresses: `name, city, state, zip`) | `{key}` |
 | `POST /sample-art` | `{text, out_key, width_in, height_in, dpi=300, color_hex="#111111"}` | `{key}` |
 
@@ -221,6 +221,21 @@ request validation errors and missing keys (`file not found: <key>`).
   bars drawn over the print 0.60-0.70. Preset checks are reported in
   `preset_failures` (`background_not_white` on white-required presets, `too_small`,
   `design_larger_than_print_area`) and don't block the write.
+- **Blank colour stays true; drawstrings under the print (T-49-5, B-287, architect ruling R4).**
+  The restored blank is the requested colour times the scene's per-channel gain, so a warm scene
+  used to recolour it (a white tee measured CIEDE2000 5.4 to 13.8 off in warm, cool and green
+  scenes; mock scenes 0.0-1.3). Now the tint of the gain is shrunk toward the luminance gain,
+  halving up to 8 times, until the predicted blank is within `BLANK_TINT_DE_MAX = 2.0`
+  (`GAIN_TINT` stays the outer bound; light falloff and shade are kept). `checks` gains two
+  optional fields: `blank_delta_e` (CIEDE2000 of the output's restored garment body vs the
+  requested hex, scaled to the same luminance so only hue and chroma count; null when the design
+  leaves no measurable blank) and `warnings` (`blank_color_shift` above `BLANK_DELTA_E_WARN =
+  3.0`). A warning never changes `passes` or `failures`: the blank is our own render, so a
+  regenerate can't fix it. Measured on the garment body inside the print area, outside the print
+  box grown 0.25 in and a 0.25 in band along the outline. CIEDE2000 is numpy (checked against the
+  Sharma 2005 table). The backend client's zod schema strips both fields until a card reads them.
+  On a hoodie the print is lit with `TemplateMaps.shadow_no_strings`, so the drawstrings lie under
+  an opaque print (they were shading it by about 11 luma levels, 15%); the blank itself keeps them.
 - **Scene lock diagnostics and `structural` (T-37-1, ADR 0036).** The `checks` object of
   `/photo/scene-composite` also carries `region_reasons` (every failed sub-check of check 1, from
   `outline_low`, `registration_at_limit`, `box_foreign`, and since T-40-2 `placement_off`; empty when it passes), `box_foreign`

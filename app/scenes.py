@@ -159,10 +159,196 @@ SHADE_SIGMA_IN = 0.4
 SHADE_RANGE = (0.7, 1.2)  # local light relative to the blank
 GAIN_RANGE = (0.5, 1.6)  # global light of the scene's garment relative to the base
 GAIN_TINT = 0.15  # most a channel's gain may differ from the luminance gain (white balance)
+# Blank colour (T-49-5, B-287, architect ruling R4). The restored blank is the requested colour
+# times the scene's light, so a warm scene's per-channel gain shows as a hue cast. The tint is
+# shrunk toward the luminance gain (halving, up to BLANK_TINT_HALVINGS times) until the predicted
+# restored colour is within BLANK_TINT_DE_MAX of the requested one; a measured shift over
+# BLANK_DELTA_E_WARN is reported as the `blank_color_shift` warning, never as a failure.
+BLANK_TINT_DE_MAX = 2.0
+BLANK_TINT_HALVINGS = 8
+BLANK_DELTA_E_WARN = 3.0
+BLANK_EDGE_IN = 0.25  # margin around the print box and along the garment outline left out
+BLANK_MIN_PX = 50  # fewer measurable garment pixels than this: no measurement
 HEIGHT_SIGMA_IN = 0.3  # the scene's light becomes a height map for displacement at this scale
 # Scene light read as relief: half of a template fold's height per unit of shadow (a template
 # fold is 70 height levels for a 19% shadow), so the print follows the scene's folds gently.
 FOLD_HEIGHT_PER_SHADE = 0.5 * 70 / 0.19
+
+# --- blank colour: CIEDE2000 in numpy -------------------------------------------------------
+
+_SRGB_TO_XYZ = np.array(
+    [
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151522, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ]
+)
+_D65 = np.array([0.95047, 1.0, 1.08883])
+
+
+def srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    c = np.asarray(c, dtype=np.float64) / 255.0
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def linear_to_lab(lin: np.ndarray) -> np.ndarray:
+    """CIELAB (D65) of linear sRGB, shape (..., 3)."""
+    t = (np.asarray(lin, dtype=np.float64) @ _SRGB_TO_XYZ.T) / _D65
+    d = 6 / 29
+    f = np.where(t > d**3, np.cbrt(t), t / (3 * d * d) + 4 / 29)
+    return np.stack(
+        [116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], -1
+    )
+
+
+def ciede2000(lab1: np.ndarray, lab2: np.ndarray) -> np.ndarray:
+    """CIEDE2000 (Sharma, Wu, Dalal 2005), kL = kC = kH = 1; shape (..., 3) in, (...) out."""
+    lab1, lab2 = np.asarray(lab1, dtype=np.float64), np.asarray(lab2, dtype=np.float64)
+    L1, a1, b1 = lab1[..., 0], lab1[..., 1], lab1[..., 2]
+    L2, a2, b2 = lab2[..., 0], lab2[..., 1], lab2[..., 2]
+    c7 = 25.0**7
+    cbar = (np.hypot(a1, b1) + np.hypot(a2, b2)) / 2
+    g = 0.5 * (1 - np.sqrt(cbar**7 / (cbar**7 + c7)))
+    a1p, a2p = (1 + g) * a1, (1 + g) * a2
+    C1, C2 = np.hypot(a1p, b1), np.hypot(a2p, b2)
+    h1 = np.degrees(np.arctan2(b1, a1p)) % 360
+    h2 = np.degrees(np.arctan2(b2, a2p)) % 360
+    zero = C1 * C2 == 0
+    dh = h2 - h1
+    dh = np.where(dh > 180, dh - 360, np.where(dh < -180, dh + 360, dh))
+    dh = np.where(zero, 0.0, dh)
+    dL, dC = L2 - L1, C2 - C1
+    dH = 2 * np.sqrt(C1 * C2) * np.sin(np.radians(dh) / 2)
+    Lb, Cb = (L1 + L2) / 2, (C1 + C2) / 2
+    hs = h1 + h2
+    hb = np.where(
+        np.abs(h1 - h2) <= 180, hs / 2, np.where(hs < 360, (hs + 360) / 2, (hs - 360) / 2)
+    )
+    hb = np.where(zero, hs, hb)
+    T = (
+        1
+        - 0.17 * np.cos(np.radians(hb - 30))
+        + 0.24 * np.cos(np.radians(2 * hb))
+        + 0.32 * np.cos(np.radians(3 * hb + 6))
+        - 0.20 * np.cos(np.radians(4 * hb - 63))
+    )
+    dtheta = 30 * np.exp(-(((hb - 275) / 25) ** 2))
+    Rc = 2 * np.sqrt(Cb**7 / (Cb**7 + c7))
+    Sl = 1 + 0.015 * (Lb - 50) ** 2 / np.sqrt(20 + (Lb - 50) ** 2)
+    Sc, Sh = 1 + 0.045 * Cb, 1 + 0.015 * Cb * T
+    Rt = -np.sin(np.radians(2 * dtheta)) * Rc
+    x, y = dC / Sc, dH / Sh
+    return np.sqrt((dL / Sl) ** 2 + x**2 + y**2 + Rt * x * y)
+
+
+def blank_shift(mean_linear: np.ndarray, rgb: tuple[int, int, int]) -> float:
+    """CIEDE2000 between a measured mean colour (linear RGB) and the requested blank. The
+    requested colour is scaled uniformly to the measured mean's luminance first, so scene light,
+    falloff and shade don't count: only hue and chroma do."""
+    mean = np.asarray(mean_linear, dtype=np.float64)
+    ref = srgb_to_linear(np.array(rgb, dtype=np.float64))
+    y_mean, y_ref = float(_SRGB_TO_XYZ[1] @ mean), float(_SRGB_TO_XYZ[1] @ ref)
+    if y_mean > 1e-6 and y_ref > 1e-6:
+        ref = ref * (y_mean / y_ref)
+    return float(ciede2000(linear_to_lab(mean), linear_to_lab(ref)))
+
+
+def _box_erode(mask: np.ndarray, r: int) -> np.ndarray:
+    """True where the whole (2r+1) square around the pixel is True (outside counts as False)."""
+    if r <= 0:
+        return mask
+    h, w = mask.shape
+    bad = np.pad(~mask, r, constant_values=True).astype(np.int32)
+    ii = np.pad(bad.cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+    k = 2 * r + 1
+    s = ii[k : k + h, k : k + w] - ii[0:h, k : k + w] - ii[k : k + h, 0:w] + ii[0:h, 0:w]
+    return s == 0
+
+
+def blank_region(
+    maps: TemplateMaps, box: tuple[int, int, int, int]
+) -> tuple[tuple[int, int], np.ndarray]:
+    """Where the restored blank is measured, in frame coordinates: the print area's garment body
+    (the feather is 1 there), without the print box grown by BLANK_EDGE_IN and without a
+    BLANK_EDGE_IN band along the garment outline. Returns the area's origin and its mask."""
+    ax, ay, aw, ah = maps.print_area_px
+    r = max(1, round(BLANK_EDGE_IN * maps.ppi))
+    x0, y0 = max(0, ax - r), max(0, ay - r)
+    x1, y1 = min(maps.width, ax + aw + r), min(maps.height, ay + ah + r)
+    solid = maps.front.crop(x0, y0, x1 - x0, y1 - y0).numpy() > 250
+    body = _box_erode(solid, r)
+    bx, by, bw, bh = box
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    near_box = (xx >= bx - r) & (xx < bx + bw + r) & (yy >= by - r) & (yy < by + bh + r)
+    inner = np.zeros_like(body)
+    inner[ay - y0 : ay - y0 + ah, ax - x0 : ax - x0 + aw] = True
+    keep = (body & ~near_box & inner)[ay - y0 : ay - y0 + ah, ax - x0 : ax - x0 + aw]
+    return (ax, ay), keep
+
+
+def _blank_pre(maps: TemplateMaps, rgb: tuple[int, int, int], x: int, y: int, w: int, h: int):
+    """The blank on the template before the scene's light: the shadow map multiplied in, the
+    highlight screened in (float image)."""
+    shadow = maps.shadow.crop(x, y, w, h).cast("float") / 255
+    hl = maps.highlight.crop(x, y, w, h).cast("float")
+    strength = 0.3 + 0.3 * (1 - photos.luma(rgb))
+    return 255 - (255 - shadow * list(rgb)) * (1 - hl * (strength / 255))
+
+
+def fit_blank_gain(
+    maps: TemplateMaps,
+    box: tuple[int, int, int, int],
+    rgb: tuple[int, int, int],
+    gain: list[float],
+    lum_gain: float,
+) -> tuple[list[float], float | None]:
+    """Shrink each channel's tint toward the luminance gain, halving the tint fraction up to
+    BLANK_TINT_HALVINGS times, until the predicted restored blank is within BLANK_TINT_DE_MAX of
+    the requested colour. Returns the gain to use and the predicted shift of the one chosen
+    (None when the area has no measurable garment, e.g. the design fills it)."""
+    (x0, y0), mask = blank_region(maps, box)
+    if mask.sum() < BLANK_MIN_PX:
+        return gain, None
+    pre = _blank_pre(maps, rgb, x0, y0, mask.shape[1], mask.shape[0]).numpy()[mask]
+    pre_mean = pre.mean(0)
+
+    def predicted(gn: list[float]) -> float:
+        out = np.clip(pre_mean * np.array(gn), 0, 255)
+        return blank_shift(srgb_to_linear(out), rgb)
+
+    chosen, de = gain, predicted(gain)
+    frac = 1.0
+    for _ in range(BLANK_TINT_HALVINGS):
+        if de <= BLANK_TINT_DE_MAX:
+            break
+        frac /= 2
+        chosen = [round(lum_gain + frac * (v - lum_gain), 4) for v in gain]
+        de = predicted(chosen)
+    return chosen, de
+
+
+def measure_blank(
+    out: pyvips.Image,
+    maps: TemplateMaps,
+    crop: tuple[int, int],
+    box: tuple[int, int, int, int],
+    rgb: tuple[int, int, int],
+) -> float | None:
+    """CIEDE2000 between the restored blank in the output frame (`crop` is its offset in the
+    template frame) and the requested colour: `blank_shift` over `blank_region`."""
+    (x0, y0), mask = blank_region(maps, box)
+    cx, cy = crop
+    h, w = mask.shape
+    ox0, oy0 = max(x0, cx), max(y0, cy)
+    ox1, oy1 = min(x0 + w, cx + out.width), min(y0 + h, cy + out.height)
+    if ox1 <= ox0 or oy1 <= oy0:
+        return None
+    sub = mask[oy0 - y0 : oy1 - y0, ox0 - x0 : ox1 - x0]
+    if sub.sum() < BLANK_MIN_PX:
+        return None
+    px = out[0:3].crop(ox0 - cx, oy0 - cy, ox1 - ox0, oy1 - oy0).numpy()[sub]
+    return blank_shift(srgb_to_linear(px).mean(0), rgb)
+
 
 # --- check 2: design lock -------------------------------------------------------------------
 
@@ -508,6 +694,7 @@ def register(scene: pyvips.Image, base: pyvips.Image, maps: TemplateMaps) -> Reg
 class OutlineCheck:
     score: float
     gain: list[float]  # per channel: scene garment / base garment in the ring, clamped
+    lum_gain: float = 1.0  # the luminance gain the channel gains are held near (GAIN_TINT)
 
 
 def outline_check(
@@ -569,7 +756,7 @@ def outline_check(
     g = min(GAIN_RANGE[1], max(GAIN_RANGE[0], g))
     per = sc.mean(0) / np.maximum(4.0, b.mean(0))
     gain = [round(float(min(g * (1 + GAIN_TINT), max(g * (1 - GAIN_TINT), v))), 4) for v in per]
-    return OutlineCheck(round(score, 4), gain)
+    return OutlineCheck(round(score, 4), gain, round(g, 4))
 
 
 @dataclass
@@ -790,6 +977,8 @@ class SceneResult:
         default_factory=list
     )  # every sub-check of check 1 that failed
     structural: bool = False  # a regenerate with the same request can't pass (see STRUCTURAL_*)
+    blank_delta_e: float | None = None  # CIEDE2000 of the restored blank vs the requested colour
+    warnings: list[str] = field(default_factory=list)  # passes unchanged: `blank_color_shift`
 
 
 def _frame(preset: photos.Preset, maps_b: TemplateMaps, garment: str, view: str):
@@ -919,15 +1108,22 @@ def composite_scene(
         )
 
     out_scene = _warp(scene, m, off, W, H).copy_memory()  # read twice: patch and frame
-    out = _restore_and_print(
-        out_scene, maps, (cx, cy), check1.gain, design, w_in, h_in, rgb, underbase
-    )
+    # The scene's white balance may not recolour the blank (B-287): the tint of the gain is
+    # shrunk until the restored colour is within BLANK_TINT_DE_MAX of the requested one.
+    gain, _ = fit_blank_gain(maps, (x, y, dw, dh), rgb, check1.gain, check1.lum_gain)
+    out = _restore_and_print(out_scene, maps, (cx, cy), gain, design, w_in, h_in, rgb, underbase)
     data = photos.encode(out, fmt, xmp_subjects)
 
     decoded = pyvips.Image.new_from_buffer(data, "")[0:3]
     lock = lock_check(decoded, maps, (cx, cy), design, w_in, h_in, rgb, underbase)
     if lock < DESIGN_LOCK_MIN:
         failures.append("design_drift")
+    # Reported, never a failure: the restored blank is our own render, so a regenerate can't fix
+    # it (architect ruling R4).
+    blank_de = measure_blank(decoded, maps, (cx, cy), (x, y, dw, dh), rgb)
+    warnings = []
+    if blank_de is not None and blank_de > BLANK_DELTA_E_WARN:
+        warnings.append("blank_color_shift")
 
     preset_failures = []
     if scale < 1.0:
@@ -951,6 +1147,8 @@ def composite_scene(
         underbase,
         preset_failures,
         box_foreign=foreign,
+        blank_delta_e=None if blank_de is None else round(blank_de, 3),
+        warnings=warnings,
     )
 
 
@@ -1017,7 +1215,13 @@ def _restore_and_print(
             white = photos._garment_rgb_patch(maps, px0, py0, qw, qh) * gain
             base = base * (1 - u) + white * shade.crop(lx, ly, qw, qh) * u
         a = art_a * front_a.crop(lx, ly, qw, qh)
-        light = (1 - (1 - shadow.crop(lx, ly, qw, qh)) * 0.5) * shade.crop(lx, ly, qw, qh) * gain
+        # The print is lit without the hoodie's drawstrings: they lie under it (T-49-5).
+        ink_shadow = shadow
+        if maps.shadow_no_strings is not None:
+            ink_shadow = crop_map(maps.shadow_no_strings).cast("float") / 255
+        light = (
+            (1 - (1 - ink_shadow.crop(lx, ly, qw, qh)) * 0.5) * shade.crop(lx, ly, qw, qh) * gain
+        )
         ink = art_rgb * light
         patch = base * (1 - a) + ink * a
         printed = fabric.insert(patch, lx, ly)
