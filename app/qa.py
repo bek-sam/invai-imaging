@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pyvips
 
+from app import qa_print
 from app.vips import ImageError, load, save_png, to_srgba
 
 DPI_ERROR = 150
@@ -19,6 +20,17 @@ class Issue:
     code: str
     severity: str
     message: str
+    # Print-file checks only (T-42-4): inches, unrounded, and boxes as 0..1 ratios of the image.
+    measured_in: float | None = None
+    regions: list[dict[str, float]] | None = None
+
+    def to_dict(self) -> dict:
+        d = {"code": self.code, "severity": self.severity, "message": self.message}
+        if self.measured_in is not None:
+            d["measured_in"] = self.measured_in
+        if self.regions:
+            d["regions"] = self.regions
+        return d
 
 
 @dataclass
@@ -32,6 +44,7 @@ class QAResult:
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d["issues"] = [i.to_dict() for i in self.issues]
         if d["effective_dpi"] is None:
             del d["effective_dpi"]
         return d
@@ -136,7 +149,76 @@ def check(
                 f"file is very small ({img.width}x{img.height}px, {size} bytes)",
             )
         )
+
+    # Print-file checks (T-42-4). The profile is read from the file as loaded, before any
+    # conversion; the art checks need transparency, so a fully opaque or blank file skips them.
+    if qa_print.is_non_srgb(img):
+        res.issues.append(
+            Issue(
+                "non_srgb",
+                "warn",
+                "this file uses a color profile other than sRGB (Adobe RGB, Display P3 or CMYK), "
+                "so colors may shift when printed",
+            )
+        )
+    if res.has_alpha and hist[255] != img.width * img.height and sum(hist[1:]) > 0:
+        try:
+            res.issues.extend(
+                _art_issues(
+                    path, res, target_dpi or DPI_WARN, bool(target_width_in or target_height_in)
+                )
+            )
+        except (ImageError, pyvips.Error):
+            pass  # the first pass decoded the file; a second failure only skips these checks
     return res
+
+
+def _art_issues(path: Path, res: QAResult, load_dpi: float, has_target: bool) -> list[Issue]:
+    """thin_line, small_text and white_box from one shrunk copy of the art."""
+    scale = qa_print.analysis_scale(res.width_px, res.height_px, res.effective_dpi)
+    rgba = qa_print.analysis_array(
+        to_srgba(load(path, access="sequential", target_dpi=load_dpi)), scale
+    )
+    out: list[Issue] = []
+    if has_target and res.effective_dpi:
+        adpi = res.effective_dpi * rgba.shape[1] / res.width_px
+        shrunk = rgba.shape[1] < res.width_px
+        cut = qa_print.ALPHA_VISIBLE_SHRUNK if shrunk else qa_print.ALPHA_VISIBLE
+        mask = rgba[..., 3] >= cut
+        thin = qa_print.thin_lines(mask, adpi)
+        if thin:
+            severity, width_in, regions = thin
+            msg = (
+                f"Some lines are too thin to print ({width_in:.3f} in)."
+                if severity == "error"
+                else f"Some lines are very thin ({width_in:.3f} in) and may not hold."
+            )
+            out.append(Issue("thin_line", severity, msg, width_in, regions))
+        text = qa_print.small_text(mask, adpi)
+        if text:
+            height_in, regions = text
+            out.append(
+                Issue(
+                    "small_text",
+                    "warn",
+                    "Small text may fill in when printed. Make it bigger if you can.",
+                    height_in,
+                    regions,
+                )
+            )
+    box = qa_print.white_box(rgba)
+    if box:
+        out.append(
+            Issue(
+                "white_box",
+                "warn",
+                "A white box surrounds the art and will print on dark shirts. "
+                "Remove the white background.",
+                None,
+                box,
+            )
+        )
+    return out
 
 
 def clean_alpha(src: Path, dest: Path, threshold: int = 128) -> None:

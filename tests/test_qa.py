@@ -65,7 +65,8 @@ def test_no_alpha_and_soft_alpha(tmp_path):
     assert cleaned.soft_alpha_ratio == 0
     assert pyvips.Image.new_from_file(str(out)).getpoint(5, 5)[3] == 255
     clean_alpha(soft, out, threshold=200)
-    assert pyvips.Image.new_from_file(str(out)).getpoint(5, 5)[3] == 0
+    # same path as the read above: skip libvips' operation cache so the rewritten file is read
+    assert pyvips.Image.new_from_file(str(out), revalidate=True).getpoint(5, 5)[3] == 0
 
 
 def test_pdf_passes_qa_at_default_dpi(tmp_path):

@@ -49,7 +49,7 @@ request validation errors and missing keys (`file not found: <key>`).
 | Endpoint | Request | Response |
 | --- | --- | --- |
 | `GET /health` | | `{ok, vips_version}` |
-| `POST /qa/check` | `{file_key, target_width_in?, target_height_in?}` | `{width_px, height_px, has_alpha, soft_alpha_ratio, effective_dpi?, issues: [{code, severity, message}]}` |
+| `POST /qa/check` | `{file_key, target_width_in?, target_height_in?}` | `{width_px, height_px, has_alpha, soft_alpha_ratio, effective_dpi?, issues: [{code, severity, message, measured_in?, regions?}]}` |
 | `POST /qa/clean-alpha` | `{file_key, out_key, threshold=128}` | `{key}` |
 | `POST /render/personalization` | `{template: {width_in, height_in, background_key?, slots: [...]}, values, out_key, dpi=300}` | `{key, width_px, height_px, flags: [{slot, code, message}]}` |
 | `POST /nest` | `{items: [{id, width_in, height_in, quantity=1}], sheet_width_in=22, spacing_in=0.25, margin_in=0.25, max_length_in=240, allow_rotation=true, label_height_in=0.42}` | `{sheets: [{index, length_in, utilization, placements: [{id, copy, x_in, y_in, width_in, height_in, rotated}]}], overall_utilization}` |
@@ -106,6 +106,35 @@ request validation errors and missing keys (`file not found: <key>`).
   warns when there is no alpha channel or it is fully opaque. `tiny_file` warns under 150px or
   2 KB. `unreadable` is returned as an issue (200), not a 422, when the key exists but isn't an
   image. `clean-alpha` snaps alpha to 0/255 at `threshold`.
+- **Print-file checks (T-42-4, `app/qa_print.py`).** Four more issue codes, each at most once per
+  call, with built-in limits only (no request fields). `measured_in` (float inches, unrounded) and
+  `regions` (up to 20 boxes `{left, top, width, height}` as 0..1 ratios, merged, largest first)
+  are left out when absent, never null.
+  - `thin_line`: error under 0.02 in, warn from 0.02 up to but not including 0.03 in (so a 6 px
+    stroke at 300 DPI is a warning and 9 px is clean). `measured_in` is the thinnest stroke.
+    Method: the visible art (alpha >= 128; 30% after a shrink so a sub-pixel line is not lost) at
+    an analysis resolution of at most 300 DPI and 16M pixels (a 22 x 60 in design is analysed at
+    ~110 DPI, 0.009 in per pixel). A pixel's *chord* is its shortest run of art pixels in four
+    directions (diagonals scaled by sqrt 2); pixels under 0.03 in form components, and a component
+    counts only with a bounding-box diagonal of at least **0.10 in** (`THIN_RUN_MIN_IN`), so the
+    tapered tip of a thick shape (star point, script letter end, badge ring edge) is not a thin
+    line. Its width is the component's median chord: exact on an axis-aligned stroke at native
+    resolution, within one analysis pixel after a shrink, about 8% high at worst for an angled
+    one. Known gap: a hairline shorter than 0.10 in is ignored; a point sharper than ~17 degrees
+    is flagged. Needs a target size (width or height); without one there is no `thin_line` or
+    `small_text`. Inches per pixel use `effective_dpi`, the same limiting axis as `low_dpi`.
+  - `small_text`: warn only. Four or more shapes of similar height (0.4 to 2.5 x the row median),
+    each 0.02 to under 0.10 in tall and at most 0.30 in wide, on one line with gaps up to 2.5 x
+    their height. Letters that touch are one shape and are not seen (heuristic).
+  - `white_box`: warn when the file has real transparency and at least 95% of the outer ring (the
+    larger of 2 px and 1% of the shorter side, on the analysis image) is opaque with R, G and B all
+    245 or more. Four regions, one per side. An opaque file is `no_alpha` only.
+  - `non_srgb`: warn for CMYK mode, a CMYK profile, or an RGB profile whose colorants differ from
+    sRGB by more than 0.02 (Adobe RGB, Display P3). No profile, an sRGB profile, a gray profile
+    or an RGB profile without readable colorants: no issue. Read from the file as loaded, before
+    any conversion. No regions.
+  - A fully transparent or fully opaque file skips the art checks. No network, no AI, no new
+    dependency (numpy and pyvips only).
 - **Personalization.** Fonts: `Inter`, `Inter Bold`, `Inter Black`, `Oswald`, `Pacifico`,
   `Bebas Neue` (unknown names fall back to Inter). Text is centered vertically in its slot and
   aligned `left|center|right`. If it doesn't fit it shrinks in 2% steps down to 60% of
@@ -315,6 +344,14 @@ in memory: designs are pre-scaled into temp PNGs, the sheet is a lazy pyvips `bl
 Temp disk use is about the output size plus the pre-scaled designs. Dense, full-color artwork
 compresses worse than the sample art, so expect larger files and somewhat longer PNG encodes.
 
+**T-42-4 (print-file checks in `/qa/check`):** a 22 x 60 in design at 300 DPI (6,600 x 18,000 px,
+119M pixels) on the same laptop: 3.1 s and 667 MB peak RSS for a dense full-color file (459 MB
+PNG), 0.7 s and 640 MB for a mostly transparent one; base was 1.3 s and 77 MB without these
+checks (it only decodes strips). Budget for this check: peak RSS under 1.5 GB, under 20 s. The
+extra memory is the analysis image (16M pixels x 4 bands) plus a few uint8 and uint32 planes of
+the same size; it does not grow with the file, because the analysis size is capped. A file over
+`imaging_max_decode_pixels` still answers with the `unreadable` issue before any of this runs.
+
 **T-P1-2 (ICC-aware `to_srgba`, mirror, `/preview`, `overall_utilization`):** re-measured on the
 same laptop with a realistic 93-design, 22in-wide sheet set (same size mix as
 `tests/test_nesting.py`'s `test_realistic_size_mix_nests_dense`, split by `/nest` into sheets of
@@ -351,6 +388,7 @@ app/nesting.py     MaxRects nesting with label strips, rotation, multi-sheet
 app/compose.py     streaming gang-sheet compose, QR + text labels
 app/pdf.py         streaming RGBA -> PDF writer (true physical size)
 app/qa.py          DPI / alpha checks, clean-alpha
+app/qa_print.py    thin line, small text, white box, color profile checks
 app/render.py      personalization templates
 app/mockups.py     vector t-shirt mockups
 app/garments.py    listing-photo garment templates (4 garments x 4 views, inches)
