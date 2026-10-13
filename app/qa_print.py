@@ -11,11 +11,20 @@ downscaled so that a pixel is at most ~0.01 in on any sheet-size design (a pixel
 in four directions (horizontal, vertical, both diagonals; diagonal runs are scaled by sqrt 2). A
 stroke of width w has chord ~w (within 8% for any angle), and a thick shape has long chords
 everywhere except at its corners and tips. Pixels whose chord is under the warn limit form
-components; a component counts only if it is a *run of real length* (bounding-box diagonal at least
-`THIN_RUN_MIN_IN`, 0.10 in). That is what keeps the tapered tip of a thick shape (a star point,
-a script letter end, a badge ring edge) from reading as a thin line: such a tip is under the limit
-only for its last ~0.03-0.05 in. Its width is the component's median chord, which makes the
-reading one analysis pixel accurate for a straight stroke.
+8-connected components (pixels that touch, corners included; never across background, so dots
+of a halftone stay separate however close they are); a component counts only if it is a *run of
+real length* (bounding-box diagonal at least `THIN_RUN_MIN_IN`, 0.10 in). That is what keeps the
+tapered tip of a thick shape (a star point, a script letter end, a badge ring edge) from reading
+as a thin line: such a tip is under the limit only for its last ~0.03-0.05 in. Its width is the
+component's median chord, which makes the reading one analysis pixel accurate for a straight
+stroke.
+
+Bounded work (security review S-72/S-73). Memory does not depend on the number of shapes: run
+lengths are computed in row blocks, per-component boxes and chord histograms come from libvips
+(`hist_find_indexed`, one value per component), and no per-pixel int64 index array is built. At
+most `MAX_THIN_COMPONENTS` components are measured. `small_text` is skipped (no issue) when the
+art has more than `MAX_TEXT_LABELS` regions or more than `MAX_TEXT_SHAPES` small shapes: that is a
+texture or a halftone, not text, and its Python row grouping would otherwise grow without bound.
 """
 
 import math
@@ -35,6 +44,9 @@ THIN_RUN_MIN_IN = 0.10  # a thin component shorter than this is a tip or a speck
 MAX_ANALYSIS_PX = 16_000_000
 MAX_ANALYSIS_DPI = 300
 MAX_REGIONS = 20
+MAX_THIN_COMPONENTS = 300  # the longest ones; only the biggest few hundred matter for the report
+MAX_TEXT_LABELS = 1_000_000  # regions (art and holes) in the mask; more is a texture
+MAX_TEXT_SHAPES = 5_000  # small shapes of glyph size; more is a halftone or a pattern
 ALPHA_VISIBLE = 128  # alpha >= this is "ink" at native resolution
 # After a shrink a stroke thinner than a pixel is spread over two pixels at about half coverage
 # each, so a threshold of 50% would lose it. 30% keeps it and overstates a stroke by under half
@@ -46,7 +58,12 @@ TEXT_MIN_IN = 0.02
 TEXT_MAX_WIDTH_IN = 0.30
 TEXT_ROW_MIN = 4
 _SQRT2 = math.sqrt(2.0)
-_RUN_CAP = 255  # chords are stored as uint8, clipped; the limits are far below this
+_RUN_CAP = 255  # run lengths are stored as uint8, clipped; the limits are far below this
+_CHUNK_PX = 1 << 20  # run lengths are computed this many pixels at a time
+# A chord is coded in one byte: 2*n for a horizontal/vertical run of n pixels, 2*n + 1 for a
+# diagonal run of n pixels (n*sqrt 2 long); 0 = not a candidate. Runs are clipped to 100 first.
+_CODE_CLIP = 100
+_CODE_VALUE = np.array([c / 2 if c % 2 == 0 else (c // 2) * _SQRT2 for c in range(256)])
 
 Region = dict[str, float]
 
@@ -65,15 +82,24 @@ def analysis_scale(width_px: int, height_px: int, eff_dpi: float | None) -> floa
 def analysis_array(rgba: pyvips.Image, scale: float) -> np.ndarray:
     """The sRGBA image shrunk by `scale` (alpha-aware) as an HxWx4 uint8 array."""
     if scale < 1.0:
-        rgba = rgba.resize(scale, kernel="linear")
+        factor = int(1 / (2 * scale))
+        if factor >= 2:
+            # A large shrink starts with an integer box shrink: libvips' resize alone on an
+            # extreme strip (8,000,000 x 2 px) peaks hundreds of MB higher.
+            out_w = max(1, round(rgba.width * scale))
+            out_h = max(1, round(rgba.height * scale))
+            # Across first: on a very wide strip a vertical pass buffers whole 8M-px lines.
+            rgba = rgba.shrinkh(min(factor, rgba.width)).shrinkv(min(factor, rgba.height))
+            rgba = rgba.resize(out_w / rgba.width, vscale=out_h / rgba.height, kernel="linear")
+        else:
+            rgba = rgba.resize(scale, kernel="linear")
     return np.frombuffer(rgba.write_to_memory(), dtype=np.uint8).reshape(rgba.height, rgba.width, 4)
 
 
 # --- run lengths ------------------------------------------------------------------------------
 
 
-def _row_runs(m: np.ndarray) -> np.ndarray:
-    """For each True pixel, the length of its horizontal run (clipped to uint8); 0 elsewhere."""
+def _row_runs_block(m: np.ndarray) -> np.ndarray:
     h, w = m.shape
     padded = np.zeros((h, w + 1), dtype=bool)
     padded[:, :w] = m
@@ -86,6 +112,17 @@ def _row_runs(m: np.ndarray) -> np.ndarray:
     return out.reshape(h, w + 1)[:, :w]
 
 
+def _row_runs(m: np.ndarray) -> np.ndarray:
+    """For each True pixel, the length of its horizontal run (clipped to uint8); 0 elsewhere.
+    Rows are independent, so they are done a block at a time to bound the index arrays."""
+    h, w = m.shape
+    out = np.empty((h, w), dtype=np.uint8)
+    step = max(1, _CHUNK_PX // (w + 1))
+    for r in range(0, h, step):
+        out[r : r + step] = _row_runs_block(m[r : r + step])
+    return out
+
+
 def _diag_runs(m: np.ndarray) -> np.ndarray:
     """Run lengths along the down-right diagonal (shear each row by its index)."""
     h, w = m.shape
@@ -95,48 +132,125 @@ def _diag_runs(m: np.ndarray) -> np.ndarray:
     buf = np.zeros(h * stride, dtype=bool)
     as_strided(buf, shape=(h, w), strides=(stride + 1, 1))[:] = m
     runs = _row_runs(buf.reshape(h, stride))
-    ys = np.arange(h)[:, None]
-    return runs[ys, np.arange(w)[None, :] + ys]
+    del buf
+    return as_strided(runs, shape=(h, w), strides=(stride + 1, 1)).copy()
 
 
 def chord_candidates(mask: np.ndarray, limit_px: float) -> tuple[np.ndarray, np.ndarray]:
-    """(candidate bool mask, chord length in pixels for the candidate pixels in nonzero order).
+    """(candidate bool mask, chord code per pixel as uint8, 0 off the candidates).
 
-    A candidate is a mask pixel with a chord under `limit_px` in some direction."""
+    A candidate is a mask pixel with a chord under `limit_px` in some direction; `_CODE_VALUE`
+    turns a code back into the chord length in pixels."""
     hv = np.minimum(_row_runs(mask), _row_runs(np.ascontiguousarray(mask.T)).T)
+    np.minimum(hv, _CODE_CLIP, out=hv)
     dd = np.minimum(_diag_runs(mask), _diag_runs(np.ascontiguousarray(mask[:, ::-1]))[:, ::-1])
-    cand = mask & ((hv < limit_px) | (dd * _SQRT2 < limit_px))
-    ys, xs = np.nonzero(cand)
-    chord = np.minimum(hv[ys, xs].astype(np.float32), dd[ys, xs].astype(np.float32) * _SQRT2)
-    return cand, chord
+    np.minimum(dd, _CODE_CLIP, out=dd)
+    cand = mask & ((hv < limit_px) | (dd < limit_px / _SQRT2))
+    # dd * sqrt 2 < hv  <=>  2 dd^2 < hv^2 (exact in uint16 for values up to _CODE_CLIP)
+    hv16 = hv.astype(np.uint16)
+    dd16 = dd.astype(np.uint16)
+    use_d = 2 * dd16 * dd16 < hv16 * hv16
+    del hv16, dd16
+    code = np.where(use_d, 2 * dd + 1, 2 * hv).astype(np.uint8)
+    code[~cand] = 0
+    return cand, code
 
 
 # --- components -------------------------------------------------------------------------------
 
 
 def _label(binary: np.ndarray) -> np.ndarray:
-    """Connected-component labels (uint32) of a bool array; label values of False pixels are
-    meaningless and never read."""
+    """4-connected region labels (uint32) of a bool array; art and background both get labels."""
     h, w = binary.shape
-    img = pyvips.Image.new_from_memory((binary.view(np.uint8) * 255).tobytes(), w, h, 1, "uchar")
+    src = np.ascontiguousarray(binary).view(np.uint8)
+    img = pyvips.Image.new_from_memory(src, w, h, 1, "uchar")
     out = img.labelregions()
     return np.frombuffer(out.write_to_memory(), dtype=np.uint32).reshape(h, w)
 
 
-def _boxes(labels: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> dict[str, np.ndarray]:
-    """Per-label bounding boxes of the pixels (ys, xs) carrying `labels` (same length)."""
-    order = np.argsort(labels, kind="stable")
-    lab, y, x = labels[order], ys[order], xs[order]
-    first = np.flatnonzero(np.r_[True, lab[1:] != lab[:-1]])
-    return {
-        "order": order,
-        "first": first,
-        "count": np.diff(np.r_[first, lab.size]),
-        "x0": np.minimum.reduceat(x, first),
-        "x1": np.maximum.reduceat(x, first),
-        "y0": np.minimum.reduceat(y, first),
-        "y1": np.maximum.reduceat(y, first),
+def _bridge_diagonals(cand: np.ndarray) -> np.ndarray:
+    """`cand` plus one pixel in each 2x2 block where two candidates touch only at a corner, so
+    4-connected labelling of the result groups `cand` 8-connected. A bridge pixel's other
+    neighbours already touch one of the two corners, so nothing across background joins."""
+    out = cand.copy()
+    out[:-1, 1:] |= cand[:-1, :-1] & cand[1:, 1:]
+    out[:-1, :-1] |= cand[:-1, 1:] & cand[1:, :-1]
+    return out
+
+
+def _region_bound(m: np.ndarray) -> int:
+    """Upper bound on the 4-connected regions (art and background) of `m`, without labelling:
+    the row runs with no pixel of the same value right above them (each region's top row has
+    one). Done a block of rows at a time."""
+    h, w = m.shape
+    total = 0
+    step = max(1, _CHUNK_PX // w)
+    for r in range(0, h, step):
+        blk = m[r : r + step]
+        same = np.zeros(blk.shape, dtype=bool)
+        if r:
+            same[:] = blk == m[r - 1 : r - 1 + blk.shape[0]]
+        else:
+            same[1:] = blk[1:] == blk[:-1]
+        start = np.ones(blk.shape, dtype=bool)
+        start[:, 1:] = blk[:, 1:] != blk[:, :-1]
+        starts = np.flatnonzero(start)
+        total += int(starts.size - np.logical_or.reduceat(same.ravel(), starts).sum())
+    return total
+
+
+def _blocks(sel: np.ndarray, labels: np.ndarray):
+    """(rows, ys, xs, labels) of the `sel` pixels, a block of rows at a time (ys within the
+    block)."""
+    h, w = sel.shape
+    step = max(1, _CHUNK_PX // w)
+    for r in range(0, h, step):
+        ys, xs = np.nonzero(sel[r : r + step])
+        if ys.size:
+            rows = slice(r, r + step)
+            yield rows, ys, xs, labels[rows][ys, xs]
+
+
+def _stats(labels: np.ndarray, sel: np.ndarray) -> dict[str, np.ndarray]:
+    """Per label (index = label): count and bounding box of the pixels where `sel` is True.
+    A label without such pixels has count 0 and a meaningless box."""
+    n = int(labels.max()) + 1 if labels.size else 1
+    big = np.iinfo(np.int32).max
+    out = {
+        "count": np.zeros(n, dtype=np.int64),
+        "x0": np.full(n, big, dtype=np.int32),
+        "y0": np.full(n, big, dtype=np.int32),
+        "x1": np.zeros(n, dtype=np.int32),
+        "y1": np.zeros(n, dtype=np.int32),
     }
+    for rows, ys, xs, lab in _blocks(sel, labels):
+        out["count"] += np.bincount(lab, minlength=n)
+        ys = (ys + rows.start).astype(np.int32)
+        xs = xs.astype(np.int32)
+        np.minimum.at(out["x0"], lab, xs)
+        np.maximum.at(out["x1"], lab, xs)
+        np.minimum.at(out["y0"], lab, ys)
+        np.maximum.at(out["y1"], lab, ys)
+    return out
+
+
+def _median_chords(labels: np.ndarray, code: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    """Median chord (pixels) of each label in `keep`, exactly as np.median over its candidate
+    pixels, from a per-label histogram of chord codes."""
+    slot = np.zeros(int(labels.max()) + 1, dtype=np.int32)
+    slot[keep] = np.arange(1, keep.size + 1)
+    hist = np.zeros((keep.size + 1) * 256, dtype=np.int64)
+    for rows, ys, xs, lab in _blocks(code > 0, labels):
+        k = slot[lab].astype(np.int64)
+        hist += np.bincount(k * 256 + code[rows][ys, xs], minlength=hist.size)
+    counts = hist.reshape(keep.size + 1, 256)[1:]
+    order = np.argsort(_CODE_VALUE, kind="stable")
+    counts, values = counts[:, order], _CODE_VALUE[order]
+    n = counts.sum(axis=1)
+    cum = counts.cumsum(axis=1)
+    lo = (cum <= ((n - 1) // 2)[:, None]).sum(axis=1)
+    hi = (cum <= (n // 2)[:, None]).sum(axis=1)
+    return (values[lo] + values[hi]) / 2
 
 
 def _region(x0: float, y0: float, x1: float, y1: float, w: int, h: int) -> Region:
@@ -193,35 +307,24 @@ def thin_lines(mask: np.ndarray, adpi: float) -> tuple[str, float, list[Region]]
     h, w = mask.shape
     warn_px = THIN_LINE_WARN_IN * adpi - 1e-6
     error_px = THIN_LINE_ERROR_IN * adpi - 1e-6
-    cand, chord = chord_candidates(mask, warn_px)
-    if not chord.size:
+    cand, code = chord_candidates(mask, warn_px)
+    if not cand.any():
         return None
-    # Dilate by one pixel before labelling so a one-pixel diagonal stays one component.
-    dil = cand.copy()
-    dil[1:, :] |= cand[:-1, :]
-    dil[:-1, :] |= cand[1:, :]
-    dil[:, 1:] |= dil[:, :-1].copy()
-    dil[:, :-1] |= dil[:, 1:].copy()
-    labels = _label(dil)
-    ys, xs = np.nonzero(cand)
-    lab = labels[ys, xs]
-    b = _boxes(lab, ys, xs)
-    diag = np.hypot(b["x1"] - b["x0"] + 1, b["y1"] - b["y0"] + 1)
-    keep = np.flatnonzero(diag >= THIN_RUN_MIN_IN * adpi)
+    labels = _label(_bridge_diagonals(cand))
+    st = _stats(labels, cand)
+    diag = np.hypot(st["x1"] - st["x0"] + 1.0, st["y1"] - st["y0"] + 1.0)
+    keep = np.flatnonzero((st["count"] > 0) & (diag >= THIN_RUN_MIN_IN * adpi))
     if not keep.size:
         return None
-    # The widest components first: only the biggest few hundred matter for the report.
-    keep = keep[np.argsort(-diag[keep])][:300]
-    sorted_chord = chord[b["order"]]
+    keep = keep[np.argsort(-diag[keep], kind="stable")][:MAX_THIN_COMPONENTS]
+    medians = _median_chords(labels, code, keep)
     widths: list[float] = []
     regions: list[Region] = []
-    for g in keep:
-        start = b["first"][g]
-        median = float(np.median(sorted_chord[start : start + b["count"][g]]))
+    for g, median in zip(keep, medians, strict=True):
         if median >= warn_px:
             continue
-        widths.append(median)
-        regions.append(_region(b["x0"][g], b["y0"][g], b["x1"][g], b["y1"][g], w, h))
+        widths.append(float(median))
+        regions.append(_region(st["x0"][g], st["y0"][g], st["x1"][g], st["y1"][g], w, h))
     if not widths:
         return None
     thinnest = min(widths)
@@ -238,27 +341,24 @@ def small_text(mask: np.ndarray, adpi: float) -> tuple[float, list[Region]] | No
     max_h = SMALL_TEXT_IN * adpi
     max_w = TEXT_MAX_WIDTH_IN * adpi
     min_h = max(2.0, TEXT_MIN_IN * adpi)
+    if _region_bound(mask) > MAX_TEXT_LABELS:
+        return None
     labels = _label(mask)
-    counts = np.bincount(labels[mask])
-    # A glyph fits in max_h x max_w; anything with more pixels is not a small shape.
-    small = counts <= max_h * max_w
-    ys, xs = np.nonzero(mask & small[np.minimum(labels, counts.size - 1)])
-    if not ys.size:
-        return None
-    lab = labels[ys, xs]
-    b = _boxes(lab, ys, xs)
-    gw, gh = b["x1"] - b["x0"] + 1, b["y1"] - b["y0"] + 1
-    ok = (gh >= min_h) & (gh < max_h) & (gw <= max_w)
+    st = _stats(labels, mask)
+    del labels
+    x0, y0, x1, y1 = st["x0"], st["y0"], st["x1"], st["y1"]
+    gw, gh = x1 - x0 + 1, y1 - y0 + 1
+    ok = (st["count"] > 0) & (gh >= min_h) & (gh < max_h) & (gw <= max_w)
     shapes = np.flatnonzero(ok)
-    if shapes.size < TEXT_ROW_MIN:
+    if not TEXT_ROW_MIN <= shapes.size <= MAX_TEXT_SHAPES:
         return None
-    cy = (b["y0"][shapes] + b["y1"][shapes]) / 2
+    cy = (y0[shapes] + y1[shapes]) / 2
     by_y = shapes[np.argsort(cy, kind="stable")]
     bands: list[list[int]] = [[int(by_y[0])]]
     for s in by_y[1:]:
         prev = bands[-1][-1]
         ref = max(gh[s], gh[prev])
-        if abs((b["y0"][s] + b["y1"][s]) - (b["y0"][prev] + b["y1"][prev])) / 2 <= 0.35 * ref:
+        if abs(int(y0[s] + y1[s]) - int(y0[prev] + y1[prev])) / 2 <= 0.35 * ref:
             bands[-1].append(int(s))
         else:
             bands.append([int(s)])
@@ -267,9 +367,9 @@ def small_text(mask: np.ndarray, adpi: float) -> tuple[float, list[Region]] | No
         if len(band) < TEXT_ROW_MIN:
             continue
         run: list[int] = []
-        for s in sorted(band, key=lambda i: b["x0"][i]):
+        for s in sorted(band, key=lambda i: x0[i]):
             if run:
-                gap = b["x0"][s] - b["x1"][run[-1]] - 1
+                gap = x0[s] - x1[run[-1]] - 1
                 ratio = gh[s] / float(np.median(gh[run]))
                 if gap > 2.5 * max(gh[s], gh[run[-1]]) or not 0.4 <= ratio <= 2.5:
                     if len(run) >= TEXT_ROW_MIN:
@@ -281,10 +381,7 @@ def small_text(mask: np.ndarray, adpi: float) -> tuple[float, list[Region]] | No
     if not rows:
         return None
     heights = np.concatenate([gh[r] for r in rows])
-    regions = [
-        _region(min(b["x0"][r]), min(b["y0"][r]), max(b["x1"][r]), max(b["y1"][r]), w, h)
-        for r in rows
-    ]
+    regions = [_region(min(x0[r]), min(y0[r]), max(x1[r]), max(y1[r]), w, h) for r in rows]
     return float(np.median(heights)) / adpi, merge_regions(regions)
 
 

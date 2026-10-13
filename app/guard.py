@@ -3,8 +3,8 @@
 A pure ASGI middleware, so both checks run before the request body is read:
 - every path except /health needs `X-Imaging-Secret` equal to one of the configured shared
   secrets (constant-time compare), or gets 401;
-- heavy paths (compose, personalization render, photo render, zip, scene base and
-  scene composite) take a slot from a per-process limiter; with
+- heavy paths (compose, personalization render, photo render, zip, scene base, scene
+  composite and print-file QA) take a slot from a per-process limiter; with
   none free the request gets 429 + Retry-After at once, before any work, so a retry is safe;
 - every response carries `X-Render-Ms`, the time spent handling it.
 """
@@ -29,6 +29,7 @@ HEAVY_PATHS = frozenset(
         "/photo/zip",
         "/photo/scene-base",
         "/photo/scene-composite",
+        "/qa/check",
     }
 )
 

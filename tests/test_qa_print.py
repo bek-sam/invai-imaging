@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 import pyvips
 from PIL import Image, ImageCms, ImageDraw
@@ -419,3 +420,141 @@ def test_qa_check_endpoint_carries_the_new_fields(tmp_path):
     thin = next(i for i in body.json()["issues"] if i["code"] == "thin_line")
     assert thin["severity"] == "error" and 0 < thin["measured_in"] < 0.02
     assert thin["regions"] and set(thin["regions"][0]) == {"left", "top", "width", "height"}
+
+
+# --- round 2 (reviews T-42-4 r1) --------------------------------------------------------------
+
+
+def dot_grid(path, w_in, h_in, dot_in=0.04, gap_in=0.02, hairline_px=0):
+    """Round dots `dot_in` wide, `gap_in` apart, at 300 DPI; optionally a horizontal hairline in a
+    0.1 in clear band across the middle."""
+    d, pitch = px(dot_in), px(dot_in + gap_in)
+    tile = pyvips.Image.black(pitch, pitch).draw_circle(255, d // 2, d // 2, d // 2, fill=True)
+    w, h = px(w_in), px(h_in)
+    a = tile.replicate(-(-w // pitch), -(-h // pitch)).crop(0, 0, w, h).cast("uchar")
+    if hairline_px:
+        a = a.draw_rect(0, 0, h // 2 - px(0.05), w, px(0.1), fill=True)
+        a = a.draw_rect(255, 0, h // 2, w, hairline_px, fill=True)
+    rgb = a.new_from_image([20, 20, 20]).copy(interpretation="srgb")
+    rgb.bandjoin(a).copy(interpretation="srgb").pngsave(str(path), compression=1)
+    return path
+
+
+@pytest.mark.parametrize("size_in", [(22, 60), (22, 30), (16, 20)])
+def test_dot_grid_on_a_shrunk_sheet_is_not_a_thin_line(tmp_path, size_in):
+    # R1: 0.04 in dots 0.02 in apart; at 22 x 60 in the analysis image is ~110 DPI and the gaps
+    # are ~2 px, which a 1-px widening before grouping used to bridge into a false error.
+    res = check(dot_grid(tmp_path / "dots.png", *size_in), *size_in)
+    assert issue(res, "thin_line") is None
+
+
+def test_hairline_through_a_dot_grid_still_flags(tmp_path):
+    res = check(dot_grid(tmp_path / "dots.png", 22, 30, hairline_px=4), 22, 30)
+    thin = issue(res, "thin_line")
+    assert thin and thin.severity == "error" and thin.measured_in < 0.02
+
+
+def ring_with_gap(gap_px: int, size_px: int = 1800):
+    """`framed` white, with a transparent notch `gap_px` wide in the top edge only. The analysis
+    ring is 18 px (1% of 1800) and holds 2*18*1800 + 2*18*1764 = 128,304 pixels."""
+    im = framed((255, 255, 255), size_px)
+    ImageDraw.Draw(im).rectangle((100, 0, 100 + gap_px - 1, 39), fill=(0, 0, 0, 0))
+    return im
+
+
+def test_white_ring_share_threshold(tmp_path):
+    # R2: 18 * 499 = 8,982 ring pixels clear -> 92.99% white: none; 214 -> 97.0%: warn.
+    assert issue(check(save(ring_with_gap(499), tmp_path, "r93.png"), 6, 6), "white_box") is None
+    assert issue(check(save(ring_with_gap(214), tmp_path, "r97.png"), 6, 6), "white_box")
+
+
+def test_transparent_or_soft_white_frame_is_not_a_white_box(tmp_path):
+    # R2: white RGB under alpha 0 (a common export) and a near-white frame at alpha 200 are not
+    # opaque, so they print nothing solid.
+    clear = framed((255, 255, 255))
+    clear.putalpha(clear.getchannel("A").point(lambda a: 0 if a == 255 else a))
+    ImageDraw.Draw(clear).ellipse((500, 500, 1300, 1300), fill=(200, 30, 30, 255))
+    assert clear.getpixel((0, 0)) == (255, 255, 255, 0)
+    assert issue(check(save(clear, tmp_path, "c.png"), 6, 6), "white_box") is None
+    soft = framed((250, 250, 250))
+    soft.putalpha(soft.getchannel("A").point(lambda a: 200 if a == 255 else a))
+    assert issue(check(save(soft, tmp_path, "s.png"), 6, 6), "white_box") is None
+
+
+HOSTILE_SCRIPT = """
+import json, resource, sys, time
+from pathlib import Path
+import pyvips
+from app.qa import check
+kind, path = sys.argv[1], Path(sys.argv[2])
+if kind == "checker":
+    tile, w, h, tw, th = [[255, 0], [0, 255]], 4000, 4000, 40, 40
+elif kind == "dots":
+    tile, w, h, tw, th = [[255, 255, 0], [255, 255, 0], [0, 0, 0]], 4000, 4000, 40, 40
+else:
+    tile, w, h, tw, th = [[255, 0], [0, 255]], 8_000_000, 2, 40, None
+t = pyvips.Image.new_from_array(tile).replicate(600, 1)
+a = t.replicate(-(-w // t.width), -(-h // t.height)).crop(0, 0, w, h).cast("uchar")
+rgb = a.new_from_image([20, 20, 20]).copy(interpretation="srgb")
+rgb.bandjoin(a).copy(interpretation="srgb").pngsave(str(path), compression=9)
+size = path.stat().st_size
+start = time.perf_counter()
+res = check(path, tw, th)
+elapsed = time.perf_counter() - start
+rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(json.dumps({"s": elapsed, "rss_mb": rss / 1e6 if sys.platform == "darwin" else rss / 1e3,
+                  "bytes": size, "codes": [i.code for i in res.issues]}))
+"""
+
+
+@pytest.mark.parametrize("kind", ["checker", "dots", "strip"])
+def test_small_hostile_files_stay_in_budget(tmp_path, kind):
+    # S1/S2: ~100 KB files that make every pixel a thin-line candidate (1 px checkerboard), ~1.8M
+    # tiny shapes (2 x 2 dots on a 3 px pitch) or an 8,000,000 x 2 px strip. Each runs alone in
+    # a subprocess so peak RSS is its own.
+    out = subprocess.run(
+        [sys.executable, "-c", HOSTILE_SCRIPT, kind, str(tmp_path / f"{kind}.png")],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=str(__import__("pathlib").Path(__file__).parent.parent),
+    )
+    r = json.loads(out.stdout.strip().splitlines()[-1])
+    print(f"hostile {kind}: {r['bytes'] // 1000} KB, {r['s']:.1f} s, peak RSS {r['rss_mb']:.0f} MB")
+    assert r["bytes"] < 1_000_000
+    assert r["rss_mb"] < 1500
+    assert r["s"] < 20
+
+
+def test_small_text_skips_a_texture_of_tiny_shapes(monkeypatch):
+    # S2: past MAX_TEXT_SHAPES small shapes the row grouping is skipped (no issue), so its
+    # Python loops stay bounded. A row of 12 glyphs 0.06 in tall warns at the default and is
+    # skipped when the cap is under 12, or when the region bound is over MAX_TEXT_LABELS.
+    m = np.array(glyph_row(12, px(0.06)).getchannel("A")) > 0
+    assert qa_print.small_text(m, DPI)
+    monkeypatch.setattr(qa_print, "MAX_TEXT_SHAPES", 11)
+    assert qa_print.small_text(m, DPI) is None
+    monkeypatch.setattr(qa_print, "MAX_TEXT_SHAPES", 5_000)
+    monkeypatch.setattr(qa_print, "MAX_TEXT_LABELS", 5)
+    assert qa_print.small_text(m, DPI) is None
+
+
+def test_qa_check_takes_a_heavy_job_slot(tmp_path, monkeypatch):
+    # S3: /qa/check shares the heavy-job limiter, so concurrent checks get 429 + Retry-After.
+    from fastapi.testclient import TestClient
+
+    from app.config import settings
+    from app.guard import HEAVY_PATHS, limiter
+    from app.main import app
+
+    assert "/qa/check" in HEAVY_PATHS
+    monkeypatch.setattr(settings, "imaging_max_heavy_jobs", 1)
+    client = TestClient(app, headers={"X-Imaging-Secret": settings.shared_secrets()[0]})
+    assert limiter.try_acquire()
+    try:
+        r = client.post("/qa/check", json={"file_key": "qaprint/none.png"})
+        assert r.status_code == 429 and r.headers["retry-after"]
+    finally:
+        limiter.release()
+    r = client.post("/qa/check", json={"file_key": "qaprint/none.png"})
+    assert r.status_code != 429

@@ -32,7 +32,7 @@ request validation errors and missing keys (`file not found: <key>`).
 | `IMAGING_SHARED_SECRET` | `invai-imaging-dev-secret` | Every path but `/health` needs `X-Imaging-Secret: <secret>` (constant-time compare), else `401`. A comma-separated list accepts each entry (rotation). The backend sends its own `IMAGING_SHARED_SECRET`. |
 | `IMAGING_ENV` | `development` (`production` in the Docker image) | `production` refuses to start on the dev secret or one under 32 chars. |
 | `IMAGING_DEV_ENDPOINTS` | `false` | `/labels/mock` and `/sample-art` answer `404` unless `true`. Local dev (`.env.example`) sets it; the backend's mock carrier and the seed need it. |
-| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose`, `/render/personalization`, `/photo/render`, `/photo/zip`, `/photo/scene-base` and `/photo/scene-composite` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
+| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose`, `/render/personalization`, `/photo/render`, `/photo/zip`, `/photo/scene-base`, `/photo/scene-composite` and `/qa/check` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
 | `IMAGING_RETRY_AFTER_S` | `5` | The `Retry-After` value. |
 | `IMAGING_MAX_DECODE_PIXELS` | `570000000` | Pixel cap checked from the header before decoding (raster, SVG size, and PDF page size × DPI). |
 | `IMAGING_PHOTO_TEMPLATE_CACHE` | `4` | Listing-photo templates kept drawn per (garment, view, size), about 20–40 MB each at 2000 px. |
@@ -115,7 +115,8 @@ request validation errors and missing keys (`file not found: <key>`).
     Method: the visible art (alpha >= 128; 30% after a shrink so a sub-pixel line is not lost) at
     an analysis resolution of at most 300 DPI and 16M pixels (a 22 x 60 in design is analysed at
     ~110 DPI, 0.009 in per pixel). A pixel's *chord* is its shortest run of art pixels in four
-    directions (diagonals scaled by sqrt 2); pixels under 0.03 in form components, and a component
+    directions (diagonals scaled by sqrt 2); pixels under 0.03 in form 8-connected components
+    (touching pixels only, never across background, so halftone dots stay apart), and a component
     counts only with a bounding-box diagonal of at least **0.10 in** (`THIN_RUN_MIN_IN`), so the
     tapered tip of a thick shape (star point, script letter end, badge ring edge) is not a thin
     line. Its width is the component's median chord: exact on an axis-aligned stroke at native
@@ -125,7 +126,9 @@ request validation errors and missing keys (`file not found: <key>`).
     `small_text`. Inches per pixel use `effective_dpi`, the same limiting axis as `low_dpi`.
   - `small_text`: warn only. Four or more shapes of similar height (0.4 to 2.5 x the row median),
     each 0.02 to under 0.10 in tall and at most 0.30 in wide, on one line with gaps up to 2.5 x
-    their height. Letters that touch are one shape and are not seen (heuristic).
+    their height. Letters that touch are one shape and are not seen (heuristic). Skipped with no
+    issue when the art has over 1,000,000 regions or over 5,000 glyph-size shapes (a texture or
+    halftone, not text; `MAX_TEXT_LABELS`, `MAX_TEXT_SHAPES`), so the work stays bounded.
   - `white_box`: warn when the file has real transparency and at least 95% of the outer ring (the
     larger of 2 px and 1% of the shorter side, on the analysis image) is opaque with R, G and B all
     245 or more. Four regions, one per side. An opaque file is `no_alpha` only.
@@ -349,7 +352,15 @@ compresses worse than the sample art, so expect larger files and somewhat longer
 PNG), 0.7 s and 640 MB for a mostly transparent one; base was 1.3 s and 77 MB without these
 checks (it only decodes strips). Budget for this check: peak RSS under 1.5 GB, under 20 s. The
 extra memory is the analysis image (16M pixels x 4 bands) plus a few uint8 and uint32 planes of
-the same size; it does not grow with the file, because the analysis size is capped. A file over
+the same size; it does not grow with the file, because the analysis size is capped. Round 2
+(security S-72/S-73): run lengths in row blocks, per-component boxes and chord medians from
+bounded per-block arrays (no int64 index array over all pixels), at most 300 thin components
+measured, and `small_text` caps above. Re-measured: 22 x 60 in mostly transparent 0.5 s / 608 MB;
+22 x 60 in 0.04 in dot grid 1.8 s / 814 MB (no `thin_line`); 22 x 60 in random noise (302 MB PNG)
+2.9 s / 743 MB. Small hostile files at a 40 in target, each ~100 KB: 1 px checkerboard 0.7 s /
+547 MB (was 10 s / 1.9 GB), 2 x 2 px dots on a 3 px pitch 1.5 s / 921 MB (was 39 s / 1.6 GB),
+8,000,000 x 2 px strip 0.1 s / 930 MB (the base decode alone is ~670 MB). `/qa/check` is a heavy
+path, so at most `IMAGING_MAX_HEAVY_JOBS` run at once per process. A file over
 `imaging_max_decode_pixels` still answers with the `unreadable` issue before any of this runs.
 
 **T-P1-2 (ICC-aware `to_srgba`, mirror, `/preview`, `overall_utilization`):** re-measured on the
