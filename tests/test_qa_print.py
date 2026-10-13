@@ -5,6 +5,7 @@ Strokes are drawn at 300 DPI (a 4 x 4 in design is 1200 px), so a 6 px stroke is
 and a 9 px stroke exactly 0.030 in."""
 
 import json
+import logging
 import math
 import struct
 import subprocess
@@ -654,17 +655,19 @@ def test_one_pixel_diagonal_hairline_is_one_8_connected_line(tmp_path):
 def test_capped_small_text_is_logged_with_counts(monkeypatch, caplog):
     m = np.array(glyph_row(12, px(0.06)).getchannel("A")) > 0
     monkeypatch.setattr(qa_print, "MAX_TEXT_SHAPES", 11)
-    with caplog.at_level("INFO", logger="invai.imaging"):
+    with caplog.at_level(logging.WARNING, logger="invai.imaging"):
         assert qa_print.small_text(m, DPI) is None
     recs = [r for r in caplog.records if r.name == "invai.imaging"]
     assert len(recs) == 1
+    assert recs[0].levelno >= logging.WARNING
     assert recs[0].getMessage() == "qa small_text skipped: 12 small shapes, cap 11"
     caplog.clear()
     monkeypatch.setattr(qa_print, "MAX_TEXT_SHAPES", 5_000)
     monkeypatch.setattr(qa_print, "MAX_TEXT_LABELS", 5)
-    with caplog.at_level("INFO", logger="invai.imaging"):
+    with caplog.at_level(logging.WARNING, logger="invai.imaging"):
         assert qa_print.small_text(m, DPI) is None
     msg = [r.getMessage() for r in caplog.records if r.name == "invai.imaging"]
+    assert all(r.levelno >= logging.WARNING for r in caplog.records)
     assert len(msg) == 1 and msg[0].endswith(", cap 5") and "regions" in msg[0]
 
 

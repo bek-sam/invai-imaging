@@ -368,7 +368,7 @@ def small_text(mask: np.ndarray, adpi: float) -> tuple[float, list[Region]] | No
     min_h = max(2.0, TEXT_MIN_IN * adpi)
     bound = _region_bound(mask)
     if bound > MAX_TEXT_LABELS:
-        log.info("qa small_text skipped: %d regions, cap %d", bound, MAX_TEXT_LABELS)
+        log.warning("qa small_text skipped: %d regions, cap %d", bound, MAX_TEXT_LABELS)
         return None
     labels = _label(mask)
     st = _stats(labels, mask)
@@ -378,7 +378,7 @@ def small_text(mask: np.ndarray, adpi: float) -> tuple[float, list[Region]] | No
     ok = (st["count"] > 0) & (gh >= min_h) & (gh < max_h) & (gw <= max_w)
     shapes = np.flatnonzero(ok)
     if shapes.size > MAX_TEXT_SHAPES:
-        log.info("qa small_text skipped: %d small shapes, cap %d", shapes.size, MAX_TEXT_SHAPES)
+        log.warning("qa small_text skipped: %d small shapes, cap %d", shapes.size, MAX_TEXT_SHAPES)
         return None
     if shapes.size < TEXT_ROW_MIN:
         return None

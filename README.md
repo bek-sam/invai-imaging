@@ -132,7 +132,7 @@ request validation errors and missing keys (`file not found: <key>`).
     each 0.02 to under 0.10 in tall and at most 0.30 in wide, on one line with gaps up to 2.5 x
     their height. Letters that touch are one shape and are not seen (heuristic). Skipped with no
     issue when the art has over 1,000,000 regions or over 5,000 glyph-size shapes (a texture or
-    halftone, not text; `MAX_TEXT_LABELS`, `MAX_TEXT_SHAPES`), so the work stays bounded; each skip writes one `invai.imaging` INFO line with the count and the
+    halftone, not text; `MAX_TEXT_LABELS`, `MAX_TEXT_SHAPES`), so the work stays bounded; each skip writes one `invai.imaging` WARNING line with the count and the
     cap (no file content).
   - `white_box`: warn when the file has real transparency and at least 95% of the outer ring (the
     larger of 2 px and 1% of the shorter side, on the analysis image) is opaque with R, G and B all
