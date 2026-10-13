@@ -68,3 +68,35 @@ def test_local_storage_rejects_escaping_keys(tmp_path):
         raise AssertionError("expected ValueError")
     except ValueError:
         pass
+
+
+def test_content_disposition_drops_lone_surrogates_keeps_whole_characters():
+    from app.storage import content_disposition_for
+
+    out = content_disposition_for("SH-1\ud800_\udfff-é-ü-\U0001f600-ñ.png")
+    assert out == 'attachment; filename="SH-1_-é-ü-\U0001f600-ñ.png"'
+    out.encode("utf-8")  # no surrogate left: strict encoding must not raise
+    # a valid surrogate pair is one emoji, not two lone halves
+    assert "\U0001f600" in content_disposition_for("a\U0001f600b")
+
+
+def test_s3_upload_with_lone_surrogate_name_puts_cleanly_against_stub(tmp_path):
+    # S-86: botocore raised on a lone surrogate in the header; the put must now succeed.
+    from tests.s3_stub import StubS3
+
+    src = tmp_path / "a.png"
+    src.write_bytes(b"png-bytes")
+    with StubS3(tmp_path) as stub:
+        cfg = Settings(
+            storage="s3",
+            s3_endpoint=stub.endpoint,
+            s3_bucket="stub-bucket",
+            s3_access_key_id="x",
+            s3_secret_access_key="y",
+        )
+        S3Storage(cfg).upload(src, "a/b.png", download_filename="SH-1\ud83d_é.png")
+        puts = stub.puts()
+    assert len(puts) == 1
+    cd = puts[0]["headers"]["content-disposition"]
+    assert "SH-1" in cd and ".png" in cd
+    assert not any(0xD800 <= ord(c) <= 0xDFFF for c in cd)

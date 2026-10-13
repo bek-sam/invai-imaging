@@ -26,9 +26,12 @@ def content_disposition_for(download_filename: str) -> str:
 
     The name never becomes the S3 key (that stays opaque, `objectKey`'s own invariant) -- only
     this header, which is what a vendor/RIP operator sees when saving the downloaded file.
-    Quotes and newlines are stripped so the value can't break out of the header.
+    Quotes and newlines are stripped so the value can't break out of the header. A Python str
+    holds code points, so any surrogate in it is a lone one (a valid pair is already one emoji):
+    those are removed, because botocore cannot sign a header that carries one (S-86).
     """
-    safe = download_filename.replace('"', "").replace("\r", "").replace("\n", "")
+    clean = download_filename.encode("utf-8", "ignore").decode("utf-8")
+    safe = clean.replace('"', "").replace("\r", "").replace("\n", "")
     return f'attachment; filename="{safe}"'
 
 
