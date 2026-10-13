@@ -159,13 +159,9 @@ SHADE_SIGMA_IN = 0.4
 SHADE_RANGE = (0.7, 1.2)  # local light relative to the blank
 GAIN_RANGE = (0.5, 1.6)  # global light of the scene's garment relative to the base
 GAIN_TINT = 0.15  # most a channel's gain may differ from the luminance gain (white balance)
-# Blank colour (T-49-5, B-287, architect ruling R4). The restored blank is the requested colour
-# times the scene's light, so a warm scene's per-channel gain shows as a hue cast. The tint is
-# shrunk toward the luminance gain (halving, up to BLANK_TINT_HALVINGS times) until the predicted
-# restored colour is within BLANK_TINT_DE_MAX of the requested one; a measured shift over
-# BLANK_DELTA_E_WARN is reported as the `blank_color_shift` warning, never as a failure.
-BLANK_TINT_DE_MAX = 2.0
-BLANK_TINT_HALVINGS = 8
+# Blank colour (T-49-5, B-287, architect ruling R4b). The restored blank follows the scene's light
+# and cast, so it matches the provider's shirt around it; a measured shift over BLANK_DELTA_E_WARN
+# is reported as the `blank_color_shift` warning, never as a failure.
 BLANK_DELTA_E_WARN = 3.0
 BLANK_EDGE_IN = 0.25  # margin around the print box and along the garment outline left out
 BLANK_MIN_PX = 50  # fewer measurable garment pixels than this: no measurement
@@ -284,47 +280,6 @@ def blank_region(
     inner[ay - y0 : ay - y0 + ah, ax - x0 : ax - x0 + aw] = True
     keep = (body & ~near_box & inner)[ay - y0 : ay - y0 + ah, ax - x0 : ax - x0 + aw]
     return (ax, ay), keep
-
-
-def _blank_pre(maps: TemplateMaps, rgb: tuple[int, int, int], x: int, y: int, w: int, h: int):
-    """The blank on the template before the scene's light: the shadow map multiplied in, the
-    highlight screened in (float image)."""
-    shadow = maps.shadow.crop(x, y, w, h).cast("float") / 255
-    hl = maps.highlight.crop(x, y, w, h).cast("float")
-    strength = 0.3 + 0.3 * (1 - photos.luma(rgb))
-    return 255 - (255 - shadow * list(rgb)) * (1 - hl * (strength / 255))
-
-
-def fit_blank_gain(
-    maps: TemplateMaps,
-    box: tuple[int, int, int, int],
-    rgb: tuple[int, int, int],
-    gain: list[float],
-    lum_gain: float,
-) -> tuple[list[float], float | None]:
-    """Shrink each channel's tint toward the luminance gain, halving the tint fraction up to
-    BLANK_TINT_HALVINGS times, until the predicted restored blank is within BLANK_TINT_DE_MAX of
-    the requested colour. Returns the gain to use and the predicted shift of the one chosen
-    (None when the area has no measurable garment, e.g. the design fills it)."""
-    (x0, y0), mask = blank_region(maps, box)
-    if mask.sum() < BLANK_MIN_PX:
-        return gain, None
-    pre = _blank_pre(maps, rgb, x0, y0, mask.shape[1], mask.shape[0]).numpy()[mask]
-    pre_mean = pre.mean(0)
-
-    def predicted(gn: list[float]) -> float:
-        out = np.clip(pre_mean * np.array(gn), 0, 255)
-        return blank_shift(srgb_to_linear(out), rgb)
-
-    chosen, de = gain, predicted(gain)
-    frac = 1.0
-    for _ in range(BLANK_TINT_HALVINGS):
-        if de <= BLANK_TINT_DE_MAX:
-            break
-        frac /= 2
-        chosen = [round(lum_gain + frac * (v - lum_gain), 4) for v in gain]
-        de = predicted(chosen)
-    return chosen, de
 
 
 def measure_blank(
@@ -694,7 +649,6 @@ def register(scene: pyvips.Image, base: pyvips.Image, maps: TemplateMaps) -> Reg
 class OutlineCheck:
     score: float
     gain: list[float]  # per channel: scene garment / base garment in the ring, clamped
-    lum_gain: float = 1.0  # the luminance gain the channel gains are held near (GAIN_TINT)
 
 
 def outline_check(
@@ -756,7 +710,7 @@ def outline_check(
     g = min(GAIN_RANGE[1], max(GAIN_RANGE[0], g))
     per = sc.mean(0) / np.maximum(4.0, b.mean(0))
     gain = [round(float(min(g * (1 + GAIN_TINT), max(g * (1 - GAIN_TINT), v))), 4) for v in per]
-    return OutlineCheck(round(score, 4), gain, round(g, 4))
+    return OutlineCheck(round(score, 4), gain)
 
 
 @dataclass
@@ -1108,10 +1062,9 @@ def composite_scene(
         )
 
     out_scene = _warp(scene, m, off, W, H).copy_memory()  # read twice: patch and frame
-    # The scene's white balance may not recolour the blank (B-287): the tint of the gain is
-    # shrunk until the restored colour is within BLANK_TINT_DE_MAX of the requested one.
-    gain, _ = fit_blank_gain(maps, (x, y, dw, dh), rgb, check1.gain, check1.lum_gain)
-    out = _restore_and_print(out_scene, maps, (cx, cy), gain, design, w_in, h_in, rgb, underbase)
+    out = _restore_and_print(
+        out_scene, maps, (cx, cy), check1.gain, design, w_in, h_in, rgb, underbase
+    )
     data = photos.encode(out, fmt, xmp_subjects)
 
     decoded = pyvips.Image.new_from_buffer(data, "")[0:3]

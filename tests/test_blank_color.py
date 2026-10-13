@@ -1,5 +1,5 @@
 """Blank colour in lifestyle scenes (T-49-5, B-287, architect ruling R4): CIEDE2000 in numpy,
-the measurement, the tint fit, the warning (never a failure), and the drawstrings."""
+the measurement, the seam, the warning (never a failure), and the drawstrings."""
 
 from pathlib import Path
 
@@ -140,22 +140,71 @@ def test_mock_like_scene_keeps_every_seed_blank_true(tmp_path, logo, no_check1, 
 
 @pytest.mark.parametrize("name", SEED_BLANKS)
 @pytest.mark.parametrize("light", [WARM, STRONG_WARM], ids=["warm", "strong_warm"])
-def test_warm_scene_does_not_recolour_the_blank(tmp_path, logo, no_check1, name, light):
+def test_warm_scene_reports_blank_color_shift(tmp_path, logo, no_check1, name, light):
+    """The restored blank follows the scene's cast, so a warm scene is measured and reported
+    (R4b): a warning only, `passes` and `failures` don't move."""
     r = run_scene(tmp_path, logo, "tee", "on_model_white", SEED_BLANKS[name], **light)
     assert r.passes and r.failures == [] and r.data is not None
-    assert r.blank_delta_e is not None and r.blank_delta_e <= 2.3, r.blank_delta_e
-    assert r.warnings == []
+    assert r.blank_delta_e is not None
+    assert ("blank_color_shift" in r.warnings) == (r.blank_delta_e > scenes.BLANK_DELTA_E_WARN)
+    if name in ("white", "heather"):
+        assert r.blank_delta_e > scenes.BLANK_DELTA_E_WARN, r.blank_delta_e
+        assert r.warnings == ["blank_color_shift"]
 
 
-def test_without_the_tint_fit_a_warm_white_tee_is_visibly_recoloured(
-    tmp_path, logo, no_check1, monkeypatch
+def _ring_shift(out, maps, crop, box, rgb):
+    """CIEDE2000 (hue and chroma only) between the print-area body and the garment body
+    0.2 to 0.8 in outside the patch edge (print area grown by MASK_MARGIN_IN), minus a 0.25 in
+    band along the outline: the seam a viewer sees where our restored patch meets the shirt."""
+    (x0, y0), inner = scenes.blank_region(maps, box)
+    cx, cy = crop
+    ppi = maps.ppi
+    ax, ay, aw, ah = maps.print_area_px
+    mg = round(scenes.MASK_MARGIN_IN * ppi)
+
+    def grown(d):
+        g = mg + round(d * ppi)
+        yy, xx = np.mgrid[0 : maps.height, 0 : maps.width]
+        return (xx >= ax - g) & (xx < ax + aw + g) & (yy >= ay - g) & (yy < ay + ah + g)
+
+    body = scenes._box_erode(maps.front.numpy() > 250, round(scenes.BLANK_EDGE_IN * ppi))
+    ring = grown(0.8) & ~grown(0.2) & body
+
+    def mean(mask, ox, oy):
+        sub = np.zeros((out.height, out.width), bool)
+        h, w = mask.shape
+        x_lo, y_lo = max(ox, cx), max(oy, cy)
+        x_hi, y_hi = min(ox + w, cx + out.width), min(oy + h, cy + out.height)
+        sub[y_lo - cy : y_hi - cy, x_lo - cx : x_hi - cx] = mask[
+            y_lo - oy : y_hi - oy, x_lo - ox : x_hi - ox
+        ]
+        assert sub.sum() > scenes.BLANK_MIN_PX
+        return scenes.srgb_to_linear(out[0:3].numpy()[sub]).mean(0)
+
+    inner_mean = mean(inner, x0, y0)
+    ring_mean = mean(ring, 0, 0)
+    ref = ring_mean * (scenes._SRGB_TO_XYZ[1] @ inner_mean) / (scenes._SRGB_TO_XYZ[1] @ ring_mean)
+    return float(scenes.ciede2000(scenes.linear_to_lab(inner_mean), scenes.linear_to_lab(ref)))
+
+
+@pytest.mark.parametrize("name", ["white", "heather"])
+@pytest.mark.parametrize("light", [WARM, STRONG_WARM], ids=["warm", "strong_warm"])
+def test_restored_patch_has_no_seam_against_the_providers_shirt(
+    tmp_path, logo, no_check1, monkeypatch, name, light
 ):
-    monkeypatch.setattr(scenes, "BLANK_TINT_DE_MAX", 1e9)  # the fit accepts the first guess
-    r = run_scene(tmp_path, logo, "tee", "on_model_white", SEED_BLANKS["white"], **WARM)
-    assert r.blank_delta_e > scenes.BLANK_DELTA_E_WARN
-    # A warning only: the render stays usable, `passes` and `failures` don't move (R4).
-    assert r.warnings == ["blank_color_shift"]
-    assert r.passes is True and r.failures == [] and r.data is not None
+    seen = {}
+    real = scenes.measure_blank
+
+    def spy(out, maps, crop, box, rgb):
+        seen["args"] = (out, maps, crop, box, rgb)
+        return real(out, maps, crop, box, rgb)
+
+    monkeypatch.setattr(scenes, "measure_blank", spy)
+    r = run_scene(tmp_path, logo, "tee", "on_model_white", SEED_BLANKS[name], **light)
+    assert r.data is not None
+    out, maps, crop, box, rgb = seen["args"]
+    seam = _ring_shift(out, maps, crop, box, rgb)
+    assert seam <= 1.0, seam
 
 
 def test_a_uniformly_darker_scene_is_not_a_colour_shift(tmp_path, logo, no_check1):
@@ -205,8 +254,8 @@ def test_scene_composite_reports_the_new_optional_fields(client, logo):
     ).json()
     c = body["checks"]
     assert c["passes"] is True, body
-    assert isinstance(c["blank_delta_e"], float) and c["blank_delta_e"] <= 2.3
-    assert c["warnings"] == []
+    assert isinstance(c["blank_delta_e"], float) and c["blank_delta_e"] > 3.0
+    assert c["warnings"] == ["blank_color_shift"]
     assert c["failures"] == []
 
 

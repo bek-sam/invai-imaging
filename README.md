@@ -221,12 +221,11 @@ request validation errors and missing keys (`file not found: <key>`).
   bars drawn over the print 0.60-0.70. Preset checks are reported in
   `preset_failures` (`background_not_white` on white-required presets, `too_small`,
   `design_larger_than_print_area`) and don't block the write.
-- **Blank colour stays true; drawstrings under the print (T-49-5, B-287, architect ruling R4).**
-  The restored blank is the requested colour times the scene's per-channel gain, so a warm scene
-  used to recolour it (a white tee measured CIEDE2000 5.4 to 13.8 off in warm, cool and green
-  scenes; mock scenes 0.0-1.3). Now the tint of the gain is shrunk toward the luminance gain,
-  halving up to 8 times, until the predicted blank is within `BLANK_TINT_DE_MAX = 2.0`
-  (`GAIN_TINT` stays the outer bound; light falloff and shade are kept). `checks` gains two
+- **Blank colour is measured; drawstrings under the print (T-49-5, B-287, architect ruling R4b).**
+  The restored blank carries the scene's light and per-channel cast (`check1.gain`, tint bounded
+  by `GAIN_TINT`), so it matches the provider's shirt around it with no seam (CIEDE2000 0.02-0.11
+  between the patch and the shirt just outside it). It is not colour-corrected: a warm scene
+  gives a white tee a measured shift well above 3.0. `checks` gains two
   optional fields: `blank_delta_e` (CIEDE2000 of the output's restored garment body vs the
   requested hex, scaled to the same luminance so only hue and chroma count; null when the design
   leaves no measurable blank) and `warnings` (`blank_color_shift` above `BLANK_DELTA_E_WARN =
