@@ -32,7 +32,8 @@ request validation errors and missing keys (`file not found: <key>`).
 | `IMAGING_SHARED_SECRET` | `invai-imaging-dev-secret` | Every path but `/health` needs `X-Imaging-Secret: <secret>` (constant-time compare), else `401`. A comma-separated list accepts each entry (rotation). The backend sends its own `IMAGING_SHARED_SECRET`. |
 | `IMAGING_ENV` | `development` (`production` in the Docker image) | `production` refuses to start on the dev secret or one under 32 chars. |
 | `IMAGING_DEV_ENDPOINTS` | `false` | `/labels/mock` and `/sample-art` answer `404` unless `true`. Local dev (`.env.example`) sets it; the backend's mock carrier and the seed need it. |
-| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose`, `/render/personalization`, `/photo/render`, `/photo/zip`, `/photo/scene-base`, `/photo/scene-composite` and `/qa/check` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
+| `IMAGING_MAX_QA_JOBS` | `1` | `/qa/check` running at once per process, from its own slot so QA never takes a `/compose` slot. Over it: `429` + `Retry-After`. |
+| `IMAGING_MAX_HEAVY_JOBS` | `2` | `/compose`, `/render/personalization`, `/photo/render`, `/photo/zip`, `/photo/scene-base`, and `/photo/scene-composite` running at once per process. Over it: `429` + `Retry-After`, before the body is read; the backend client retries. |
 | `IMAGING_RETRY_AFTER_S` | `5` | The `Retry-After` value. |
 | `IMAGING_MAX_DECODE_PIXELS` | `570000000` | Pixel cap checked from the header before decoding (raster, SVG size, and PDF page size × DPI). |
 | `IMAGING_PHOTO_TEMPLATE_CACHE` | `4` | Listing-photo templates kept drawn per (garment, view, size), about 20–40 MB each at 2000 px. |
@@ -359,8 +360,8 @@ measured, and `small_text` caps above. Re-measured: 22 x 60 in mostly transparen
 22 x 60 in 0.04 in dot grid 1.8 s / 814 MB (no `thin_line`); 22 x 60 in random noise (302 MB PNG)
 2.9 s / 743 MB. Small hostile files at a 40 in target, each ~100 KB: 1 px checkerboard 0.7 s /
 547 MB (was 10 s / 1.9 GB), 2 x 2 px dots on a 3 px pitch 1.5 s / 921 MB (was 39 s / 1.6 GB),
-8,000,000 x 2 px strip 0.1 s / 930 MB (the base decode alone is ~670 MB). `/qa/check` is a heavy
-path, so at most `IMAGING_MAX_HEAVY_JOBS` run at once per process. A file over
+8,000,000 x 2 px strip 0.1 s / 930 MB (the base decode alone is ~670 MB). `/qa/check` has its own
+limiter, so at most `IMAGING_MAX_QA_JOBS` (default 1) run at once per process and none takes a compose slot. A file over
 `imaging_max_decode_pixels` still answers with the `unreadable` issue before any of this runs.
 
 **T-P1-2 (ICC-aware `to_srgba`, mirror, `/preview`, `overall_utilization`):** re-measured on the

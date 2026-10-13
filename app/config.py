@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Heavy jobs (compose, personalization render) running at once in this process; the rest get
     # 429 + Retry-After. A 240in compose peaks near 0.5-1 GB, so size this to the task's memory.
     imaging_max_heavy_jobs: int = Field(2, ge=1)
+    imaging_max_qa_jobs: int = Field(1, ge=1)
     imaging_retry_after_s: int = Field(5, ge=1)
     # Pixel cap on any decode (raster header, SVG size, PDF page x DPI), checked before pixels
     # are decoded: 22 x 240in at 300 DPI x 1.2 is about 570M pixels.

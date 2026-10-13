@@ -539,22 +539,32 @@ def test_small_text_skips_a_texture_of_tiny_shapes(monkeypatch):
     assert qa_print.small_text(m, DPI) is None
 
 
-def test_qa_check_takes_a_heavy_job_slot(tmp_path, monkeypatch):
-    # S3: /qa/check shares the heavy-job limiter, so concurrent checks get 429 + Retry-After.
+def test_qa_check_has_its_own_slot_apart_from_compose(monkeypatch):
+    # S-75: /qa/check never takes a /compose slot; a second concurrent check gets 429.
     from fastapi.testclient import TestClient
 
     from app.config import settings
-    from app.guard import HEAVY_PATHS, limiter
+    from app.guard import HEAVY_PATHS, limiter, qa_limiter
     from app.main import app
 
-    assert "/qa/check" in HEAVY_PATHS
+    assert "/qa/check" not in HEAVY_PATHS
     monkeypatch.setattr(settings, "imaging_max_heavy_jobs", 1)
+    monkeypatch.setattr(settings, "imaging_max_qa_jobs", 1)
     client = TestClient(app, headers={"X-Imaging-Secret": settings.shared_secrets()[0]})
+    body = {"file_key": "qaprint/none.png"}
+    assert qa_limiter.try_acquire()
+    try:
+        r = client.post("/qa/check", json=body)
+        assert r.status_code == 429 and r.headers["retry-after"]
+        assert limiter.try_acquire()  # compose still gets its slot while QA is held
+        limiter.release()
+    finally:
+        qa_limiter.release()
+    assert client.post("/qa/check", json=body).status_code != 429
+    assert limiter.in_flight == 0 and qa_limiter.in_flight == 0
+    # and the other way: a held compose slot does not block QA
     assert limiter.try_acquire()
     try:
-        r = client.post("/qa/check", json={"file_key": "qaprint/none.png"})
-        assert r.status_code == 429 and r.headers["retry-after"]
+        assert client.post("/qa/check", json=body).status_code != 429
     finally:
         limiter.release()
-    r = client.post("/qa/check", json={"file_key": "qaprint/none.png"})
-    assert r.status_code != 429

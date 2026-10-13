@@ -3,8 +3,9 @@
 A pure ASGI middleware, so both checks run before the request body is read:
 - every path except /health needs `X-Imaging-Secret` equal to one of the configured shared
   secrets (constant-time compare), or gets 401;
-- heavy paths (compose, personalization render, photo render, zip, scene base, scene
-  composite and print-file QA) take a slot from a per-process limiter; with
+- heavy paths (compose, personalization render, photo render, zip, scene base and scene
+  composite) take a slot from a per-process limiter, and print-file QA (/qa/check) from its
+  own (IMAGING_MAX_QA_JOBS, default 1), so QA never takes a compose slot; with
   none free the request gets 429 + Retry-After at once, before any work, so a retry is safe;
 - every response carries `X-Render-Ms`, the time spent handling it.
 """
@@ -29,9 +30,10 @@ HEAVY_PATHS = frozenset(
         "/photo/zip",
         "/photo/scene-base",
         "/photo/scene-composite",
-        "/qa/check",
     }
 )
+# Print-file QA has its own slot(s), so it can never take a /compose slot (S-75).
+QA_PATHS = frozenset({"/qa/check"})
 
 
 def _digest(value: str) -> bytes:
@@ -52,11 +54,12 @@ def secret_ok(provided: str | None) -> bool:
 class HeavyJobLimiter:
     """Non-blocking slot counter. All access is on the event loop thread, so no lock needed."""
 
-    def __init__(self) -> None:
+    def __init__(self, setting: str = "imaging_max_heavy_jobs") -> None:
         self.in_flight = 0
+        self._setting = setting
 
     def try_acquire(self) -> bool:
-        if self.in_flight >= settings.imaging_max_heavy_jobs:
+        if self.in_flight >= getattr(settings, self._setting):
             return False
         self.in_flight += 1
         return True
@@ -66,6 +69,7 @@ class HeavyJobLimiter:
 
 
 limiter = HeavyJobLimiter()
+qa_limiter = HeavyJobLimiter("imaging_max_qa_jobs")
 
 
 async def _send_json(send, status: int, detail: str, extra: list[tuple[bytes, bytes]] = ()):
@@ -98,10 +102,10 @@ class GuardMiddleware:
                 log.warning("imaging auth rejected %s %s", scope["method"], path)
                 return await _send_json(send, 401, "missing or invalid imaging credentials")
 
-        heavy = path in HEAVY_PATHS
-        if heavy and not limiter.try_acquire():
+        slot = limiter if path in HEAVY_PATHS else qa_limiter if path in QA_PATHS else None
+        if slot is not None and not slot.try_acquire():
             retry = str(settings.imaging_retry_after_s).encode()
-            log.warning("imaging busy: %s rejected, %d heavy jobs running", path, limiter.in_flight)
+            log.warning("imaging busy: %s rejected, %d jobs running", path, slot.in_flight)
             return await _send_json(
                 send, 429, "imaging is busy; retry later", [(b"retry-after", retry)]
             )
@@ -120,5 +124,5 @@ class GuardMiddleware:
         try:
             await self.app(scope, receive, timed_send)
         finally:
-            if heavy:
-                limiter.release()
+            if slot is not None:
+                slot.release()
