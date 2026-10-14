@@ -175,7 +175,8 @@ def compose(
         art_rgb, art_a = art[0:3], art[3].cast("float") / 255
 
         front_a = maps.front.crop(px0, py0, pw, ph).cast("float") / 255
-        shade = maps.shadow.crop(px0, py0, pw, ph).cast("float") / 255
+        # The print is lit without the hoodie's drawstrings: they lie under it (T-52-3).
+        shade = _ink_shadow(maps).crop(px0, py0, pw, ph).cast("float") / 255
         base = garment.crop(px0, py0, pw, ph).cast("float")
         if underbase:
             g = art_a * UNDERBASE_GAIN
@@ -208,9 +209,14 @@ def layer(
     return maps.front.ifthenelse(front_rgb, canvas, blend=True).copy(interpretation="srgb")
 
 
+def _ink_shadow(maps: TemplateMaps) -> pyvips.Image:
+    """The shadow map that lights what sits under the print (ink and white underbase)."""
+    return maps.shadow_no_strings if maps.shadow_no_strings is not None else maps.shadow
+
+
 def _garment_rgb_patch(maps: TemplateMaps, x: int, y: int, w: int, h: int) -> pyvips.Image:
     """White underbase as it sits on the fabric (same folds), for one patch."""
-    shade = maps.shadow.crop(x, y, w, h).cast("float") / 255
+    shade = _ink_shadow(maps).crop(x, y, w, h).cast("float") / 255
     hl = maps.highlight.crop(x, y, w, h).cast("float") * (0.3 / 255)
     white = shade * [255.0, 255.0, 255.0]
     return 255 - (255 - white) * (1 - hl)

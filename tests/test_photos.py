@@ -1,10 +1,12 @@
 """Listing photos (T-26-2): templates, real-size composite, underbase, presets and checks, XMP,
 palette and zip."""
 
+import dataclasses
 import io
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import pytest
 import pyvips
 from fastapi.testclient import TestClient
@@ -167,6 +169,86 @@ def test_underbase_preview_changes_nothing_on_light_blank():
     b, info = photos.compose(maps, soft, 4, 4, "#F2F2F2", True)
     assert info["underbase"] is False
     assert (a - b).abs().max() == 0
+
+
+# --- hoodie print is lit without the drawstrings (T-52-3) ----------------------------------
+
+
+def _np(img):
+    return np.ndarray(
+        buffer=img.write_to_memory(), dtype=np.uint8, shape=(img.height, img.width, img.bands)
+    ).astype(int)
+
+
+def _hoodie_case():
+    """Hoodie maps, the strings mask read from the maps, and the same maps with the whole
+    garment lit strings-free (the reference)."""
+    maps = garments.template_maps("hoodie", "front_flat", 1000, 1000)
+    assert maps.shadow_no_strings is not None
+    a = _np(maps.shadow)[..., 0]
+    b = _np(maps.shadow_no_strings)[..., 0]
+    mask = np.abs(b - a) > 1
+    clean = dataclasses.replace(maps, shadow=maps.shadow_no_strings, shadow_no_strings=None)
+    return maps, clean, mask
+
+
+def _box(maps, d_in=4):
+    x, y, dw, dh, _ = photos._place(maps, d_in, d_in)
+    return x, y, dw, dh
+
+
+def test_hoodie_strings_cross_the_print_box_and_are_read_from_the_maps():
+    maps, _, mask = _hoodie_case()
+    x, y, dw, dh = _box(maps)
+    cols = np.where(mask[y : y + dh].any(axis=0))[0]
+    gap = np.diff(cols).argmax()  # the two strings are separate column runs
+    left, right = cols[: gap + 1], cols[gap + 1 :]
+    assert left.max() < right.min()
+    for side in (left, right):
+        rows = mask[y : y + dh, side.min() : side.max() + 1].any(axis=1).sum()
+        assert rows > 40  # both strings cross the print box over many rows
+        assert x <= side.min() and side.max() < x + dw
+
+
+@pytest.mark.parametrize("underbase", [False, True])
+def test_hoodie_print_is_lit_without_strings_but_the_garment_keeps_them(underbase):
+    maps, clean, mask = _hoodie_case()
+    # opaque art for the ink; half-transparent art on a dark blank to see the underbase
+    alpha, hexv = (128, "#6E6E6E") if underbase else (255, "#1B3A6B")
+    path = ROOT / put_design(f"{CO}/t/hood{alpha}.png", 200, 200, alpha=alpha, rgb=(220, 30, 30))
+    new, _ = photos.compose(maps, path, 4, 4, hexv, underbase)
+    ref, _ = photos.compose(clean, path, 4, 4, hexv, underbase)
+    n, r = _np(new), _np(ref)
+    x, y, dw, dh = _box(maps)
+    front = _np(maps.front)[..., 0] == 255
+    inside = np.zeros_like(mask)
+    inside[y : y + dh, x : x + dw] = True
+    # (a) every pixel of the print that the strings cover is lit like the strings-free frame
+    sel = mask & inside & front
+    assert sel.sum() > 1000
+    assert np.abs(n - r)[sel].max() <= 1
+    # (b) seam: just outside the box on the edges the strings touch, they still show
+    for ys in (y - 1, y + dh):
+        cols = np.where(mask[ys] & front[ys])[0]
+        assert len(cols) > 0
+        assert (r[ys, cols] - n[ys, cols]).max() > 10
+    # edges outside the strings: inside and outside lighting are the same as the reference
+    off = ~mask
+    assert np.abs(n - r)[off].max() <= 1
+
+
+def test_template_without_strings_map_is_lit_by_shadow():
+    maps = garments.template_maps("tee", "front_flat", 800, 800)
+    assert maps.shadow_no_strings is None
+    path = ROOT / put_design(f"{CO}/t/teeink.png", 200, 200, rgb=(220, 30, 30))
+    out, _ = photos.compose(maps, path, 4, 4, "#F2F2F2", False)
+    x, y, dw, dh = _box(maps)
+    n = _np(out)
+    shade = _np(maps.shadow)[..., 0] / 255
+    for fx, fy in ((0.5, 0.5), (0.2, 0.3), (0.8, 0.7)):
+        px, py = x + int(dw * fx), y + int(dh * fy)
+        want = np.array([220, 30, 30]) * (1 - (1 - shade[py, px]) * 0.5)
+        assert np.abs(n[py, px] - want).max() <= 1.5
 
 
 # --- presets and checks ---------------------------------------------------------------------
