@@ -53,7 +53,10 @@ def test_s3_storage_sets_content_disposition_from_filename_hint(tmp_path):
         src.write_bytes(b"png-bytes")
         s.upload(src, "a/b.png", download_filename='SH-1042_DB-1001"; evil\r\n.png')
         head = s.client.head_object(Bucket="test-bucket", Key="a/b.png")
-        assert head["ContentDisposition"] == 'attachment; filename="SH-1042_DB-1001; evil.png"'
+        assert head["ContentDisposition"] == (
+            'attachment; filename="SH-1042_DB-1001; evil.png"; '
+            "filename*=UTF-8''SH-1042_DB-1001%3B%20evil.png"
+        )
 
         # no hint -> no ContentDisposition header at all (existing callers are unaffected)
         s.upload(src, "a/c.png")
@@ -74,10 +77,60 @@ def test_content_disposition_drops_lone_surrogates_keeps_whole_characters():
     from app.storage import content_disposition_for
 
     out = content_disposition_for("SH-1\ud800_\udfff-é-ü-\U0001f600-ñ.png")
-    assert out == 'attachment; filename="SH-1_-é-ü-\U0001f600-ñ.png"'
-    out.encode("utf-8")  # no surrogate left: strict encoding must not raise
-    # a valid surrogate pair is one emoji, not two lone halves
-    assert "\U0001f600" in content_disposition_for("a\U0001f600b")
+    assert out == (
+        'attachment; filename="SH-1_-_-_-_-_.png"; '
+        "filename*=UTF-8''SH-1_-%C3%A9-%C3%BC-%F0%9F%98%80-%C3%B1.png"
+    )
+    assert out.isascii()
+    # a valid surrogate pair is one emoji (one "_" in the fallback), not two lone halves
+    assert "%F0%9F%98%80" in content_disposition_for("a\U0001f600b")
+    assert 'filename="a_b"' in content_disposition_for("a\U0001f600b")
+
+
+def test_content_disposition_is_pure_ascii_and_exact():
+    from app.storage import content_disposition_for
+
+    h = content_disposition_for("SH-9 é.png")
+    assert h.isascii()
+    assert h == "attachment; filename=\"SH-9 _.png\"; filename*=UTF-8''SH-9%20%C3%A9.png"
+
+
+def test_content_disposition_strips_every_c0_control_and_del_and_c1():
+    from app.storage import content_disposition_for
+
+    for cp in [*range(0x20), 0x7F, *range(0x80, 0xA0)]:
+        h = content_disposition_for(f"a{chr(cp)}b.png")
+        assert h == ("attachment; filename=\"ab.png\"; filename*=UTF-8''ab.png"), hex(cp)
+        assert h.isascii()
+
+
+def test_content_disposition_strips_quote_and_backslash_including_trailing():
+    from app.storage import content_disposition_for
+
+    assert content_disposition_for('a"b\\c.png') == (
+        "attachment; filename=\"abc.png\"; filename*=UTF-8''abc.png"
+    )
+    # a trailing backslash would escape the closing quote of the quoted-string
+    h = content_disposition_for("sheet\\")
+    assert h == "attachment; filename=\"sheet\"; filename*=UTF-8''sheet"
+    assert '\\"' not in h
+    assert "\\" not in content_disposition_for("\\\\\\")
+
+
+def test_s3_upload_passes_the_exact_header_to_the_boto_client(tmp_path):
+    from unittest.mock import MagicMock
+
+    src = tmp_path / "a.png"
+    src.write_bytes(b"x")
+    s = S3Storage.__new__(S3Storage)
+    s.client = MagicMock()
+    s.bucket = "b"
+    s.upload(src, "a/b.png", download_filename="SH-1 é\\")
+    (_, bucket, key), kw = s.client.upload_file.call_args
+    assert (bucket, key) == ("b", "a/b.png")
+    cd = kw["ExtraArgs"]["ContentDisposition"]
+    assert cd == "attachment; filename=\"SH-1 _\"; filename*=UTF-8''SH-1%20%C3%A9"
+    assert cd.isascii()
 
 
 def test_s3_upload_with_lone_surrogate_name_puts_cleanly_against_stub(tmp_path):
@@ -98,5 +151,6 @@ def test_s3_upload_with_lone_surrogate_name_puts_cleanly_against_stub(tmp_path):
         puts = stub.puts()
     assert len(puts) == 1
     cd = puts[0]["headers"]["content-disposition"]
-    assert "SH-1" in cd and ".png" in cd
+    assert cd == "attachment; filename=\"SH-1__.png\"; filename*=UTF-8''SH-1_%C3%A9.png"
+    assert cd.isascii()
     assert not any(0xD800 <= ord(c) <= 0xDFFF for c in cd)

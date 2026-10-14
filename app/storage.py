@@ -9,6 +9,7 @@ import shutil
 from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import quote
 
 from app.config import Settings, settings
 
@@ -22,17 +23,20 @@ def content_type_for(key: str) -> str:
 
 
 def content_disposition_for(download_filename: str) -> str:
-    """`attachment; filename="..."` for a caller-supplied name (sheet id + order numbers, B-79).
+    """RFC 6266 `Content-Disposition` for a caller-supplied name (sheet id + order numbers, B-79).
 
     The name never becomes the S3 key (that stays opaque, `objectKey`'s own invariant) -- only
     this header, which is what a vendor/RIP operator sees when saving the downloaded file.
-    Quotes and newlines are stripped so the value can't break out of the header. A Python str
-    holds code points, so any surrogate in it is a lone one (a valid pair is already one emoji):
-    those are removed, because botocore cannot sign a header that carries one (S-86).
+    `clean` drops lone surrogates (botocore cannot sign them, S-86; a valid pair is already one
+    emoji), C0 controls, DEL, C1 controls, `"` and `\\`. The header is pure ASCII: an ASCII
+    `filename` fallback (non-ASCII -> `_`) plus the RFC 5987 `filename*` with the real name,
+    percent-encoded, so S3/MinIO/botocore always accept it. Same shape as the backend's
+    `contentDisposition` (`lib/s3.ts`).
     """
-    clean = download_filename.encode("utf-8", "ignore").decode("utf-8")
-    safe = clean.replace('"', "").replace("\r", "").replace("\n", "")
-    return f'attachment; filename="{safe}"'
+    utf8 = download_filename.encode("utf-8", "ignore").decode("utf-8")
+    clean = "".join(c for c in utf8 if not (ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F or c in '"\\'))
+    fallback = "".join(c if c.isascii() else "_" for c in clean)
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(clean, safe='')}"
 
 
 class Storage(Protocol):
